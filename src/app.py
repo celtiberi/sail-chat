@@ -1,0 +1,481 @@
+import os
+from pathlib import Path
+from dotenv import load_dotenv
+import chainlit as cl
+from langchain import hub
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.runnables import RunnablePassthrough
+from langchain_chroma import Chroma
+from sentence_transformers import SentenceTransformer
+from langchain_community.embeddings import HuggingFaceEmbeddings
+from datetime import datetime
+import sys
+import asyncio
+from dataclasses import dataclass, field
+from typing import Optional, Tuple, List, Dict, Any, Set, Callable
+import logging
+from time import perf_counter
+from langchain_core.documents import Document
+import re
+from collections import Counter
+from sklearn.feature_extraction.text import TfidfVectorizer
+import numpy as np
+from chromadb import PersistentClient
+from chromadb.utils import embedding_functions
+from langchain.retrievers import (
+    MultiQueryRetriever,
+)
+from langchain.prompts import PromptTemplate
+from langchain.chains import LLMChain
+from langchain.storage import InMemoryStore
+from langchain_core.retrievers import BaseRetriever
+from langchain.chains.query_constructor.base import AttributeInfo
+from langchain.schema import format_document
+from langchain.schema.messages import get_buffer_string
+from langchain.schema.runnable import RunnableParallel
+from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from pydantic import Field
+from functools import lru_cache
+from contextlib import asynccontextmanager
+
+# ======================
+# Application Configuration
+# ======================
+
+@dataclass
+class LLMConfig:
+    """Language Model Configuration"""
+    model_name: str = "gemini-2.0-flash"  # Model to use
+    temperature: float = 0.7  # Higher = more creative, Lower = more focused
+    top_p: float = 0.8  # Nucleus sampling parameter
+    max_tokens: Optional[int] = None  # Max output length (None = model default)
+
+@dataclass
+class RetrieverConfig:
+    """Document Retrieval Configuration"""
+    content_collection: str = "forum_content"  # Main content collection
+    hierarchy_collection: str = "forum_hierarchies"  # Hierarchy collection
+    num_hierarchy_results: int = 3  # Number of hierarchy documents to retrieve
+    num_content_results: int = 50  # Number of content documents to retrieve
+    mmr_lambda: float = 0.7  # Balance between relevance and diversity
+    fetch_k: int = 20        # Number of candidates for MMR
+
+@dataclass
+class ChatConfig:
+    """Chat History and Context Configuration"""
+    max_history_items: int = 20  # Maximum number of messages to keep
+    context_window: int = 5  # Number of recent messages for context
+    show_sources: bool = False  # Whether to display source documents
+    show_search_stats: bool = True  # Whether to show number of docs found
+
+@dataclass
+class AppConfig:
+    """Main Application Configuration"""
+    llm: LLMConfig = field(default_factory=LLMConfig)
+    retriever: RetrieverConfig = field(default_factory=RetrieverConfig)
+    chat: ChatConfig = field(default_factory=ChatConfig)
+    debug_mode: bool = False
+    
+    def validate(self):
+        """Validate configuration values."""
+        if self.retriever.num_hierarchy_results < 1:
+            raise ValueError("num_hierarchy_results must be positive")
+        if self.retriever.num_content_results < 1:
+            raise ValueError("num_content_results must be positive")
+        if self.chat.max_history_items < 1:
+            raise ValueError("max_history_items must be positive")
+        if not self.llm.model_name:
+            raise ValueError("model_name must be specified")
+        if self.llm.temperature < 0 or self.llm.temperature > 1:
+            raise ValueError("temperature must be between 0 and 1")
+
+@dataclass
+class UserSettings:
+    show_sources: bool = True
+    show_stats: bool = True
+
+# Create configuration instance
+CONFIG = AppConfig()
+
+# Load environment variables
+if not load_dotenv():
+    print("Warning: No .env file found", file=sys.stderr)
+
+# Validate required environment variables
+if not os.getenv("GOOGLE_API_KEY"):
+    raise ValueError(
+        "GOOGLE_API_KEY environment variable is not set. "
+        "Please set it in your .env file"
+    )
+
+# Get vectordb path relative to current file
+VECTORDB_PATH = Path(__file__).parent.parent.parent / "forum-scrape" / "vectordb"
+
+# Add these constants at the top
+PREVIEW_LENGTH: int = 200  # Length of content previews in logs
+LOG_SEPARATOR: str = "=" * 50  # Separator for log sections
+
+# Add at top of file after other imports
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler('forum_chat.log')
+    ]
+)
+logger = logging.getLogger(__name__)
+
+def cosine_similarity(vec1: np.ndarray, vec2: np.ndarray) -> float:
+    """Compute cosine similarity between two vectors."""
+    norm1 = np.linalg.norm(vec1)
+    norm2 = np.linalg.norm(vec2)
+    if norm1 == 0 or norm2 == 0:
+        return 0.0
+    return np.dot(vec1, vec2) / (norm1 * norm2)
+
+class ListRetriever(BaseRetriever):
+    """Simple retriever that returns documents from a list."""
+    
+    documents: List[Document] = Field(default_factory=list)
+    
+    def __init__(self, documents: List[Document]):
+        super().__init__(documents=documents)
+    
+    async def aget_relevant_documents(self, query: str) -> List[Document]:
+        return self.documents
+    
+    def get_relevant_documents(self, query: str) -> List[Document]:
+        return self.documents
+
+class ForumRetriever:
+    """Retrieves forum content using a two-stage search."""
+    
+    def __init__(self, hierarchy_db: Chroma, content_db: Chroma, llm, embeddings):
+        self.llm = llm
+        self.embeddings = embeddings
+        
+        # Create QA prompt template and chain
+        self.qa_prompt = ChatPromptTemplate.from_messages([
+            ("system", """
+                Ye be a wise old sea captain with decades of sailing experience. 
+                Your task is to help landlubbers and new sailors understand the ways of the sea using the following context.
+                
+                Here's the relevant information from the ship's logs:
+                {context}
+                
+                Remember:
+                1. Speak like a seasoned captain - use nautical terms but explain them
+                2. Be patient and detailed - these are new sailors asking
+                3. If ye find multiple solutions, list them all
+                4. If the context isn't sufficient, admit it
+                5. Format your response using these markdown guidelines:
+                  - Use #### for main headings (smaller and cleaner)
+                  - Use ##### for subsections
+                  - Use - for bullet points
+                  - Use *italics* for nautical terms
+                  - Use **bold** for important points
+                  - Use > for tips and explanations
+                  - Keep paragraphs short and well-spaced
+                  - Keep headings concise and not too prominent
+            """),
+            MessagesPlaceholder(variable_name="chat_history"),
+            ("human", "{question}")
+        ])
+        self.chain = self.qa_prompt | self.llm | StrOutputParser()
+        
+        # Create simple retrievers
+        self.hierarchy_retriever = hierarchy_db.as_retriever(
+            search_type="similarity",
+            search_kwargs={
+                "k": CONFIG.retriever.num_hierarchy_results,
+                "timeout": 30  # Add timeout
+            }
+        )
+        
+        # Create content retriever
+        self.content_retriever = content_db.as_retriever(
+            search_type="similarity",
+            search_kwargs={
+                "k": CONFIG.retriever.num_content_results,
+                "timeout": 30  # Add timeout
+            }
+        )
+    
+    async def get_relevant_documents(self, question: str):
+        """Get relevant documents using two-stage search."""
+        try:
+            logger.info(f"Starting retrieval for question: {question}")
+            
+            # First search hierarchy to get topics - use ainvoke instead of deprecated method
+            hierarchy_docs = await self.hierarchy_retriever.ainvoke(question)
+            logger.info(f"Found {len(hierarchy_docs)} hierarchy docs")
+            
+            # Extract topics from paths
+            topics = set()
+            for doc in hierarchy_docs:
+                path = doc.metadata.get("path", "")
+                if path:
+                    # Split path into topics
+                    topics.update(t.strip() for t in path.split(" > "))
+            
+            logger.info(f"Extracted topics: {topics}")
+            
+            # Search content using content retriever
+            content_docs = await self.content_retriever.ainvoke(question)
+            
+            logger.info(f"Found {len(content_docs)} relevant docs")
+            return content_docs, list(topics)
+        except Exception as e:
+            logger.error(f"Error during document retrieval: {str(e)}", exc_info=True)
+            # Return empty results rather than crashing
+            return [], []
+    
+    async def get_response(self, question: str, docs: List[Document], chat_history: List[dict] = None) -> str:
+        """Generate response using context from documents."""
+        try:
+            # Convert chat history to messages
+            messages = []
+            if chat_history:
+                for msg in chat_history[-5:]:  # Last 5 messages
+                    if msg["role"] == "human":
+                        messages.append(HumanMessage(content=msg["content"]))
+                    else:
+                        messages.append(AIMessage(content=msg["content"]))
+            
+            # Format context
+            context = "\n\n".join(doc.page_content for doc in docs)
+            
+            # Get response
+            response = await self.chain.ainvoke({
+                "context": context,
+                "question": question,
+                "chat_history": messages
+            })
+            
+            return response
+            
+        except Exception as e:
+            logger.error(f"Error generating response: {str(e)}", exc_info=True)
+            raise RuntimeError("Failed to generate response") from e
+
+@cl.on_chat_start
+async def init():
+    try:
+        logger.info(f"\n{LOG_SEPARATOR}")
+        logger.info("Initializing chat session")
+        # Initialize LLM
+        llm = ChatGoogleGenerativeAI(
+            model=CONFIG.llm.model_name,
+            temperature=CONFIG.llm.temperature,
+            max_output_tokens=CONFIG.llm.max_tokens,
+            top_p=CONFIG.llm.top_p,
+        )
+        logger.info("LLM initialized")
+        
+        # Initialize embeddings for LangChain
+        embeddings = HuggingFaceEmbeddings(
+            model_name="all-MiniLM-L6-v2"
+        )
+        
+        # Initialize ChromaDB client
+        client = PersistentClient(path=str(VECTORDB_PATH))
+        
+        # Get collections using LangChain embeddings
+        hierarchy_db = Chroma(
+            client=client,
+            collection_name=CONFIG.retriever.hierarchy_collection,
+            embedding_function=embeddings  # Use LangChain embeddings
+        )
+        
+        content_db = Chroma(
+            client=client,
+            collection_name=CONFIG.retriever.content_collection,
+            embedding_function=embeddings  # Use LangChain embeddings
+        )
+        
+        # Create retriever with embeddings passed in
+        retriever = ForumRetriever(
+            hierarchy_db=hierarchy_db,
+            content_db=content_db,
+            llm=llm,
+            embeddings=embeddings
+        )
+        
+        # Store in session
+        cl.user_session.set("retriever", retriever)
+        cl.user_session.set("llm", llm)
+        cl.user_session.set("chat_history", [])
+        
+        await cl.Message(
+            content="Ready to answer questions about the forum data!",
+            author="Assistant"
+        ).send()
+        
+    except Exception as e:
+        await handle_error(e, "initialization")
+
+@cl.on_message
+async def main(message: cl.Message):
+    try:
+        start_time = perf_counter()
+        logger.info(f"\n{LOG_SEPARATOR}")
+        logger.info(f"Processing message: {message.content}")
+        
+        # Get components
+        retriever = cl.user_session.get("retriever")
+        if not retriever:
+            logger.error("Retriever not found in session")
+            raise RuntimeError("Session not properly initialized")
+        chat_history = cl.user_session.get("chat_history", [])
+        
+        # Create response message
+        logger.info("Sending initial empty message")
+        msg = cl.Message(
+            content="",
+            author="Assistant"
+        )
+        await msg.send()
+        
+        # Get relevant documents
+        logger.info("Starting document retrieval")
+        docs, topics = await retriever.get_relevant_documents(message.content)
+        logger.info(f"Retrieved {len(docs)} documents")
+        
+        # Show search stats if enabled
+        if CONFIG.chat.show_search_stats:
+            logger.info("Sending search stats")
+            await cl.Message(
+                content=f"Found {len(docs)} relevant documents using topics: "
+                        f"{', '.join(topics) if topics else 'no specific topics'}\n"
+                        f"Processing time: {perf_counter() - start_time:.2f}s",
+                author="System",
+                type="info"
+            ).send()
+        
+        # Generate response
+        logger.info("Generating response")
+        response = await retriever.get_response(
+            question=message.content,
+            docs=docs,
+            chat_history=chat_history
+        )
+        logger.info("Response generated successfully")
+        
+        # Update chat history
+        logger.info("Updating chat history")
+        chat_history.extend([
+            {
+                "role": "human",
+                "content": message.content,
+                "timestamp": datetime.now().isoformat()
+            },
+            {
+                "role": "assistant",
+                "content": response,
+                "timestamp": datetime.now().isoformat()
+            }
+        ])
+        
+        # Trim history if needed
+        if len(chat_history) > CONFIG.chat.max_history_items:
+            chat_history = chat_history[-CONFIG.chat.max_history_items:]
+        
+        cl.user_session.set("chat_history", chat_history)
+        
+        # Update response
+        logger.info("Updating response message")
+        msg.content = response
+        if CONFIG.chat.show_sources:
+            msg.elements = prepare_source_elements(docs)
+        await msg.update()
+        logger.info(f"Message processing completed in {perf_counter() - start_time:.2f}s")
+        
+    except Exception as e:
+        logger.error("Error in message processing", exc_info=True)
+        await handle_error(e, "processing")
+
+@cl.on_chat_end
+async def end():
+    try:
+        # ChromaDB handles cleanup internally
+        await cl.Message(
+            content="Chat session ended. Thank you for using the assistant!",
+            author="Assistant"
+        ).send()
+    except Exception as e:
+        logger.error(f"Error during cleanup: {str(e)}")
+
+@cl.on_stop
+async def stop():
+    await cl.Message(
+        content="Processing stopped. Feel free to ask another question!",
+        author="Assistant"
+    ).send()
+
+# Add new utility endpoints
+@cl.on_settings_update
+async def setup_settings(settings: dict):
+    """Update user settings with validation."""
+    try:
+        current = cl.user_session.get("settings", UserSettings())
+        
+        # Validate and update settings
+        if "show_sources" in settings:
+            current.show_sources = bool(settings["show_sources"])
+        if "show_stats" in settings:
+            current.show_stats = bool(settings["show_stats"])
+            
+        cl.user_session.set("settings", current)
+        
+        await cl.Message(
+            content="Settings updated successfully",
+            author="System",
+            type="info"
+        ).send()
+    except Exception as e:
+        await handle_error(e, "settings update")
+
+@cl.on_chat_resume
+async def resume_chat():
+    """Handle chat resume"""
+    # Restore last known good state
+    last_state = cl.user_session.get("last_state")
+    if last_state:
+        await cl.Message(
+            content="Restored previous conversation state.",
+            author="System",
+            type="info"
+        ).send()
+
+def prepare_source_elements(docs: List[Document]) -> List[cl.Text]:
+    """Create source elements for display."""
+    return [
+        cl.Text(
+            name=f"Source {idx}",
+            content=f"**Thread {doc.metadata.get('thread_id')} from Forum {doc.metadata.get('forum_id')}**\n"
+                   f"Topic: {doc.metadata.get('topic', 'Unknown Topic')}\n\n"
+                   f"{doc.page_content}",
+            display="inline",
+            language="markdown"
+        )
+        for idx, doc in enumerate(docs, 1)
+    ]
+
+async def handle_error(error: Exception, context: str):
+    """Handle errors consistently."""
+    error_msg = f"Error during {context}: {str(error)}"
+    logger.error(error_msg, exc_info=True)
+    
+    user_msg = "An error occurred while processing your request."
+    if CONFIG.debug_mode:
+        user_msg = f"{user_msg}\n\nDebug info: {str(error)}"
+    
+    await cl.Message(
+        content=user_msg,
+        author="System",
+        type="error"
+    ).send()
