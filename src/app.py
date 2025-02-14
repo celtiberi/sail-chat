@@ -131,6 +131,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+
 def cosine_similarity(vec1: np.ndarray, vec2: np.ndarray) -> float:
     """Compute cosine similarity between two vectors."""
     norm1 = np.linalg.norm(vec1)
@@ -155,8 +156,8 @@ class ListRetriever(BaseRetriever):
 
 def create_chain(retriever: Retriever):
     """Create a LangGraph chain for retrieval and generation."""
-    # Create the graph
-    graph_builder = StateGraph(State)
+    # Create the graph with State class as schema
+    graph_builder = StateGraph(State)  # Pass the class, not instance
     
     # Add nodes for retrieval and generation
     graph_builder.add_node("analyze", retriever.analyze_query)
@@ -176,6 +177,7 @@ async def init():
     try:
         logger.info(f"\n{LOG_SEPARATOR}")
         logger.info("Initializing chat session")
+        
         # Initialize LLM
         llm = ChatGoogleGenerativeAI(
             model=CONFIG.llm.model_name,
@@ -205,21 +207,21 @@ async def init():
             collection_name=CONFIG.retriever.content_collection,
             embedding_function=embeddings  # Use LangChain embeddings
         )
+        logger.info("Vector stores initialized")
         
-        # Create new retriever
+        # Create retriever
         retriever = Retriever(
             vector_store=content_db,
             llm=llm,
         )
         
-        # Create LangGraph chain
+        # Create chain with State class as schema
         chain = create_chain(retriever)
         
-        # Store in session
+        # Store chain and empty chat history
         cl.user_session.set("chain", chain)
-        cl.user_session.set("llm", llm)
-        cl.user_session.set("chat_history", [])
-        
+        cl.user_session.set("state", State(question=""))
+
         await cl.Message(
             content="Ready to answer questions about the forum data!",
             author="Assistant"
@@ -235,71 +237,38 @@ async def main(message: cl.Message):
         logger.info(f"\n{LOG_SEPARATOR}")
         logger.info(f"Processing message: {message.content}")
         
-        # Get components
+        # Get chain
         chain = cl.user_session.get("chain")
         if not chain:
             logger.error("Chain not found in session")
             raise RuntimeError("Session not properly initialized")
-        chat_history = cl.user_session.get("chat_history", [])
         
         # Create response message
         logger.info("Sending initial empty message")
-        msg = cl.Message(
-            content="",
-            author="Assistant"
-        )
+        msg = cl.Message(content="", author="Assistant")
         await msg.send()
         
-        # Run the chain
-        logger.info("Running retrieval and generation chain")
-        initial_state = State(
-            question=message.content,
-        )
-        result = await chain.ainvoke(
-            initial_state.model_dump()
-        )
+        # Create state for this retrieval process
+        state = cl.user_session.get("state")
+        state.question = message.content
+        result = await chain.ainvoke(state.model_dump())
         
-        docs = result["context"]
-        response = result["answer"]
-        logger.info(f"Retrieved {len(docs)} documents")
+        # Update state with result
+        state.running_context = result["running_context"]
+        state.chat_history = result["chat_history"]
+
+        state.chat_history.append({"role": "human", "content": message.content})
+        state.chat_history.append({"role": "assistant", "content": result["answer"]})
         
-        # Show search stats if enabled
-        if CONFIG.chat.show_search_stats:
-            logger.info("Sending search stats")
-            await cl.Message(
-                content=f"Found {len(docs)} relevant documents using topics: "
-                        f"Processing time: {perf_counter() - start_time:.2f}s",
-                author="System",
-                type="info"
-            ).send()
-        
-        # Update chat history
-        logger.info("Updating chat history")
-        chat_history.extend([
-            {
-                "role": "human",
-                "content": message.content,
-                "timestamp": datetime.now().isoformat()
-            },
-            {
-                "role": "assistant",
-                "content": response,
-                "timestamp": datetime.now().isoformat()
-            }
-        ])
-        
-        # Trim history if needed
-        if len(chat_history) > CONFIG.chat.max_history_items:
-            chat_history = chat_history[-CONFIG.chat.max_history_items:]
-        
-        cl.user_session.set("chat_history", chat_history)
+        cl.user_session.set("state", state)
         
         # Update response
         logger.info("Updating response message")
-        msg.content = response
+        msg.content = result["answer"]
         if CONFIG.chat.show_sources:
-            msg.elements = prepare_source_elements(docs)
+            msg.elements = prepare_source_elements(result.get("context", []))
         await msg.update()
+        
         logger.info(f"Message processing completed in {perf_counter() - start_time:.2f}s")
         
     except Exception as e:
@@ -350,14 +319,11 @@ async def setup_settings(settings: dict):
 @cl.on_chat_resume
 async def resume_chat():
     """Handle chat resume"""
-    # Restore last known good state
-    last_state = cl.user_session.get("last_state")
-    if last_state:
-        await cl.Message(
-            content="Restored previous conversation state.",
-            author="System",
-            type="info"
-        ).send()
+    await cl.Message(
+        content="Restored previous conversation state.",
+        author="System",
+        type="info"
+    ).send()
 
 def prepare_source_elements(docs: List[Document]) -> List[cl.Text]:
     """Create source elements for display."""

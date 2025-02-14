@@ -2,7 +2,7 @@ from langchain_core.documents import Document
 from typing_extensions import Literal, get_args
 from pydantic import BaseModel, Field
 from typing import List, Dict, Any
-from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.language_models import BaseChatModel
 from langchain_core.vectorstores import VectorStore
 import logging
@@ -58,15 +58,19 @@ BASE_SYSTEM_TEMPLATE = """
     Ye be a wise old sea captain with decades of sailing experience. 
     Your task is to help landlubbers and new sailors understand the ways of the sea using the following context.
     
+    Previous conversation:
+    {chat_history}
+    
     Here's the relevant information from the ship's logs:
     {context}
     
     Remember:
     1. Speak like a seasoned captain - use nautical terms but explain them
     2. Be patient and detailed - these are new sailors asking
-    3. If ye find multiple solutions, list them all
-    4. If the context isn't sufficient, admit it
-    5. Format your response using these markdown guidelines:
+    3. If the users question doesn't make sense, ask them to clarify it.  Do not just make up an answer.
+    4. If ye find multiple solutions, list them all
+    5. If the context isn't sufficient, admit it
+    6. Format your response using these markdown guidelines:
       - Use #### for main headings (smaller and cleaner)
       - Use ##### for subsections
       - Use - for bullet points
@@ -91,17 +95,21 @@ class Search(BaseModel):
 class State(BaseModel):
     question: str
     query: Search = Field(default_factory=Search.default)
-    context: List[Document] = Field(default_factory=list)
+    current_context: List[Document] = Field(default_factory=list)  # Documents for current query
+    running_context: List[Document] = Field(default_factory=list)  # Accumulated context
     answer: str = Field(default="")
+    chat_history: List[Dict[str, str]] = Field(default_factory=list)
 
 @dataclass
 class RetrieverConfig:
     """Configuration for the Retriever"""
-    num_docs: int = 5  # Number of documents to retrieve
-    max_tokens: int = 4096  # Max tokens for context window
-    temperature: float = 0.7  # Temperature for response generation
+    metadata_search_k: int = 15    # Number of docs to retrieve with metadata filter
+    semantic_search_k: int = 15    # Number of docs to retrieve with semantic search
+    doc_window_size: int = 30      # Maximum number of docs to keep in context window
+    chat_window_size: int = 10     # Number of message pairs to keep in chat history
     query_template: str = ""
     system_template: str = ""
+    chat: dict = Field(default_factory=dict)
 
 # Create a single instance of the config with formatted templates
 CONFIG = RetrieverConfig(
@@ -132,9 +140,10 @@ class Retriever:
             ("human", "{question}")
         ])
         
-        # Create QA prompt template
+        # Create prompt template with structured chat history
         self.prompt = ChatPromptTemplate.from_messages([
             ("system", CONFIG.system_template),
+            MessagesPlaceholder(variable_name="chat_history"),
             ("human", "{question}")
         ])
 
@@ -158,36 +167,111 @@ class Retriever:
             }
 
     async def retrieve(self, state: State) -> Dict[str, List[Document]]:
-        """Retrieve relevant documents based on the question."""
+        """Retrieve relevant documents using both metadata filtering and semantic search."""
         try:
             logger.info(f"Retrieving documents for query: {state.query}")
-            retrieved_docs = await self.vector_store.asimilarity_search(
+            
+            # Get documents using metadata filter
+            metadata_docs = await self.vector_store.asimilarity_search(
                 state.query.query,
-                k=CONFIG.num_docs
+                k=CONFIG.metadata_search_k,
+                filter={"topics": state.query.topics}
             )
-            logger.info(f"Retrieved {len(retrieved_docs)} documents")
-            return {"context": retrieved_docs}
+            logger.info(f"Retrieved {len(metadata_docs)} metadata filtered docs")
+            
+            # Get documents using pure semantic search
+            semantic_docs = await self.vector_store.asimilarity_search(
+                state.query.query,
+                k=CONFIG.semantic_search_k
+            )
+            logger.info(f"Retrieved {len(semantic_docs)} semantic search docs")
+            
+            # Combine results, removing duplicates while preserving order
+            seen_ids = set()
+            combined_docs = []
+            
+            # Add metadata filtered docs first
+            for doc in metadata_docs:
+                if doc.id not in seen_ids:
+                    seen_ids.add(doc.id)
+                    combined_docs.append(doc)
+            
+            # Add unique semantic docs
+            for doc in semantic_docs:
+                if doc.id not in seen_ids:
+                    seen_ids.add(doc.id)
+                    combined_docs.append(doc)
+            
+            logger.info(f"Combined into {len(combined_docs)} unique documents")
+            
+            # Update state with retrieved documents
+            # state.current_context = combined_docs
+            logger.info(f"Updated state.current_context with {len(combined_docs)} docs")
+            
+            return {
+                "current_context": combined_docs
+                }
+            
         except Exception as e:
             logger.error(f"Error retrieving documents: {str(e)}", exc_info=True)
             raise RetrievalError(f"Failed to retrieve documents: {str(e)}")
 
     async def generate(self, state: State) -> Dict[str, str]:
-        """Generate response using retrieved documents."""
+        """Generate response using both current and running context."""
         try:
             logger.info("Generating response from context")
-            docs_content = "\n\n".join(doc.page_content for doc in state.context)
+            logger.info(f"Initial state - current_context: {len(state.current_context)} docs, running_context: {len(state.running_context)} docs")
+            
+            logger.info(f"State current_context length: {len(state.current_context)}")
+            logger.info(f"State running_context length: {len(state.running_context)}")
+            
+            # Remove docs from running context that are in current context
+            current_ids = {doc.id for doc in state.current_context}
+            filtered_running_docs = [
+                doc for doc in state.running_context 
+                if doc.id not in current_ids
+            ]
+            logger.info(f"Removed {len(state.running_context) - len(filtered_running_docs)} duplicate docs from running context")
+            logger.info(f"Filtered running docs: {len(filtered_running_docs)}")
+            
+            # Add current docs at front, running docs at back
+            combined_docs = state.current_context + filtered_running_docs
+            logger.info(f"Combined docs before trimming: {len(combined_docs)}")
+            
+            # Trim to window size
+            combined_docs = combined_docs[:CONFIG.doc_window_size]
+            logger.info(f"Document window size after trimming: {len(combined_docs)} docs")
+            
+            # Update running context
+            # state.running_context = combined_docs
+            # logger.info(f"Updated running context size: {len(state.running_context)}")
+            
+            # Trim chat history if needed
+            # Todo: this code should be in the app.py file
+            chat_history = state.chat_history
+            if len(chat_history) > CONFIG.chat_window_size * 2:  # Keep pairs of messages
+                chat_history = chat_history[-CONFIG.chat_window_size * 2:]
+            
+            # Generate response using combined context
+            docs_content = "\n\n".join(doc.page_content for doc in combined_docs)
             
             # Format messages using prompt template
             messages = await self.prompt.ainvoke({
                 "question": state.question,
-                "context": docs_content
+                "context": docs_content,
+                "chat_history": state.chat_history
             })
             
             # Get response from LLM
             response = await self.llm.ainvoke(messages)
             logger.info("Response generated successfully")
             
-            return {"answer": response.content}
+            return {
+                "answer": response.content,
+                "running_context": combined_docs,
+                "chat_history": chat_history
+                }
+        
         except Exception as e:
             logger.error(f"Error generating response: {str(e)}", exc_info=True)
             return {"answer": "Apologies, but I encountered an error while trying to answer your question."} 
