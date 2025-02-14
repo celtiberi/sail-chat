@@ -8,7 +8,7 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnablePassthrough
 from langchain_chroma import Chroma
 from sentence_transformers import SentenceTransformer
-from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_huggingface import HuggingFaceEmbeddings
 from datetime import datetime
 import sys
 import asyncio
@@ -40,6 +40,8 @@ from langchain.text_splitter import RecursiveCharacterTextSplitter
 from pydantic import Field
 from functools import lru_cache
 from contextlib import asynccontextmanager
+from retriever import Retriever, State
+from langgraph.graph import START, StateGraph
 
 # ======================
 # Application Configuration
@@ -151,116 +153,23 @@ class ListRetriever(BaseRetriever):
     def get_relevant_documents(self, query: str) -> List[Document]:
         return self.documents
 
-class ForumRetriever:
-    """Retrieves forum content using a two-stage search."""
+def create_chain(retriever: Retriever):
+    """Create a LangGraph chain for retrieval and generation."""
+    # Create the graph
+    graph_builder = StateGraph(State)
     
-    def __init__(self, hierarchy_db: Chroma, content_db: Chroma, llm, embeddings):
-        self.llm = llm
-        self.embeddings = embeddings
-        
-        # Create QA prompt template and chain
-        self.qa_prompt = ChatPromptTemplate.from_messages([
-            ("system", """
-                Ye be a wise old sea captain with decades of sailing experience. 
-                Your task is to help landlubbers and new sailors understand the ways of the sea using the following context.
-                
-                Here's the relevant information from the ship's logs:
-                {context}
-                
-                Remember:
-                1. Speak like a seasoned captain - use nautical terms but explain them
-                2. Be patient and detailed - these are new sailors asking
-                3. If ye find multiple solutions, list them all
-                4. If the context isn't sufficient, admit it
-                5. Format your response using these markdown guidelines:
-                  - Use #### for main headings (smaller and cleaner)
-                  - Use ##### for subsections
-                  - Use - for bullet points
-                  - Use *italics* for nautical terms
-                  - Use **bold** for important points
-                  - Use > for tips and explanations
-                  - Keep paragraphs short and well-spaced
-                  - Keep headings concise and not too prominent
-            """),
-            MessagesPlaceholder(variable_name="chat_history"),
-            ("human", "{question}")
-        ])
-        self.chain = self.qa_prompt | self.llm | StrOutputParser()
-        
-        # Create simple retrievers
-        self.hierarchy_retriever = hierarchy_db.as_retriever(
-            search_type="similarity",
-            search_kwargs={
-                "k": CONFIG.retriever.num_hierarchy_results,
-                "timeout": 30  # Add timeout
-            }
-        )
-        
-        # Create content retriever
-        self.content_retriever = content_db.as_retriever(
-            search_type="similarity",
-            search_kwargs={
-                "k": CONFIG.retriever.num_content_results,
-                "timeout": 30  # Add timeout
-            }
-        )
+    # Add nodes for retrieval and generation
+    graph_builder.add_node("analyze", retriever.analyze_query)
+    graph_builder.add_node("retrieve", retriever.retrieve)
+    graph_builder.add_node("generate", retriever.generate)
     
-    async def get_relevant_documents(self, question: str):
-        """Get relevant documents using two-stage search."""
-        try:
-            logger.info(f"Starting retrieval for question: {question}")
-            
-            # First search hierarchy to get topics - use ainvoke instead of deprecated method
-            hierarchy_docs = await self.hierarchy_retriever.ainvoke(question)
-            logger.info(f"Found {len(hierarchy_docs)} hierarchy docs")
-            
-            # Extract topics from paths
-            topics = set()
-            for doc in hierarchy_docs:
-                path = doc.metadata.get("path", "")
-                if path:
-                    # Split path into topics
-                    topics.update(t.strip() for t in path.split(" > "))
-            
-            logger.info(f"Extracted topics: {topics}")
-            
-            # Search content using content retriever
-            content_docs = await self.content_retriever.ainvoke(question)
-            
-            logger.info(f"Found {len(content_docs)} relevant docs")
-            return content_docs, list(topics)
-        except Exception as e:
-            logger.error(f"Error during document retrieval: {str(e)}", exc_info=True)
-            # Return empty results rather than crashing
-            return [], []
+    # Add edges
+    graph_builder.add_edge(START, "analyze")
+    graph_builder.add_edge("analyze", "retrieve")
+    graph_builder.add_edge("retrieve", "generate")
     
-    async def get_response(self, question: str, docs: List[Document], chat_history: List[dict] = None) -> str:
-        """Generate response using context from documents."""
-        try:
-            # Convert chat history to messages
-            messages = []
-            if chat_history:
-                for msg in chat_history[-5:]:  # Last 5 messages
-                    if msg["role"] == "human":
-                        messages.append(HumanMessage(content=msg["content"]))
-                    else:
-                        messages.append(AIMessage(content=msg["content"]))
-            
-            # Format context
-            context = "\n\n".join(doc.page_content for doc in docs)
-            
-            # Get response
-            response = await self.chain.ainvoke({
-                "context": context,
-                "question": question,
-                "chat_history": messages
-            })
-            
-            return response
-            
-        except Exception as e:
-            logger.error(f"Error generating response: {str(e)}", exc_info=True)
-            raise RuntimeError("Failed to generate response") from e
+    # Compile the graph
+    return graph_builder.compile()
 
 @cl.on_chat_start
 async def init():
@@ -297,16 +206,17 @@ async def init():
             embedding_function=embeddings  # Use LangChain embeddings
         )
         
-        # Create retriever with embeddings passed in
-        retriever = ForumRetriever(
-            hierarchy_db=hierarchy_db,
-            content_db=content_db,
+        # Create new retriever
+        retriever = Retriever(
+            vector_store=content_db,
             llm=llm,
-            embeddings=embeddings
         )
         
+        # Create LangGraph chain
+        chain = create_chain(retriever)
+        
         # Store in session
-        cl.user_session.set("retriever", retriever)
+        cl.user_session.set("chain", chain)
         cl.user_session.set("llm", llm)
         cl.user_session.set("chat_history", [])
         
@@ -326,9 +236,9 @@ async def main(message: cl.Message):
         logger.info(f"Processing message: {message.content}")
         
         # Get components
-        retriever = cl.user_session.get("retriever")
-        if not retriever:
-            logger.error("Retriever not found in session")
+        chain = cl.user_session.get("chain")
+        if not chain:
+            logger.error("Chain not found in session")
             raise RuntimeError("Session not properly initialized")
         chat_history = cl.user_session.get("chat_history", [])
         
@@ -340,9 +250,17 @@ async def main(message: cl.Message):
         )
         await msg.send()
         
-        # Get relevant documents
-        logger.info("Starting document retrieval")
-        docs, topics = await retriever.get_relevant_documents(message.content)
+        # Run the chain
+        logger.info("Running retrieval and generation chain")
+        initial_state = State(
+            question=message.content,
+        )
+        result = await chain.ainvoke(
+            initial_state.model_dump()
+        )
+        
+        docs = result["context"]
+        response = result["answer"]
         logger.info(f"Retrieved {len(docs)} documents")
         
         # Show search stats if enabled
@@ -350,20 +268,10 @@ async def main(message: cl.Message):
             logger.info("Sending search stats")
             await cl.Message(
                 content=f"Found {len(docs)} relevant documents using topics: "
-                        f"{', '.join(topics) if topics else 'no specific topics'}\n"
                         f"Processing time: {perf_counter() - start_time:.2f}s",
                 author="System",
                 type="info"
             ).send()
-        
-        # Generate response
-        logger.info("Generating response")
-        response = await retriever.get_response(
-            question=message.content,
-            docs=docs,
-            chat_history=chat_history
-        )
-        logger.info("Response generated successfully")
         
         # Update chat history
         logger.info("Updating chat history")
