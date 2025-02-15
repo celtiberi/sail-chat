@@ -2,46 +2,25 @@ import os
 from pathlib import Path
 from dotenv import load_dotenv
 import chainlit as cl
-from langchain import hub
 from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_core.output_parsers import StrOutputParser
-from langchain_core.runnables import RunnablePassthrough
 from langchain_chroma import Chroma
-from sentence_transformers import SentenceTransformer
 from langchain_huggingface import HuggingFaceEmbeddings
-from datetime import datetime
 import sys
-import asyncio
 from dataclasses import dataclass, field
 from typing import Optional, Tuple, List, Dict, Any, Set, Callable
 import logging
 from time import perf_counter
 from langchain_core.documents import Document
-import re
-from collections import Counter
-from sklearn.feature_extraction.text import TfidfVectorizer
 import numpy as np
 from chromadb import PersistentClient
-from chromadb.utils import embedding_functions
-from langchain.retrievers import (
-    MultiQueryRetriever,
-)
-from langchain.prompts import PromptTemplate
-from langchain.chains import LLMChain
-from langchain.storage import InMemoryStore
 from langchain_core.retrievers import BaseRetriever
-from langchain.chains.query_constructor.base import AttributeInfo
-from langchain.schema import format_document
-from langchain.schema.messages import get_buffer_string
-from langchain.schema.runnable import RunnableParallel
-from langchain_core.messages import AIMessage, HumanMessage
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain.text_splitter import RecursiveCharacterTextSplitter
 from pydantic import Field
-from functools import lru_cache
-from contextlib import asynccontextmanager
-from retriever import Retriever, State
+from retriever import Retriever
+from models import State
 from langgraph.graph import START, StateGraph
+
+from dataclasses import asdict
+from session_manager import SessionManager
 
 # ======================
 # Application Configuration
@@ -178,6 +157,9 @@ async def init():
         logger.info(f"\n{LOG_SEPARATOR}")
         logger.info("Initializing chat session")
         
+        session = SessionManager(State)
+        cl.user_session.set("session", session)
+
         # Initialize LLM
         llm = ChatGoogleGenerativeAI(
             model=CONFIG.llm.model_name,
@@ -233,43 +215,31 @@ async def init():
 @cl.on_message
 async def main(message: cl.Message):
     try:
-        start_time = perf_counter()
-        logger.info(f"\n{LOG_SEPARATOR}")
-        logger.info(f"Processing message: {message.content}")
-        
-        # Get chain
+        session = cl.user_session.get("session")
         chain = cl.user_session.get("chain")
-        if not chain:
-            logger.error("Chain not found in session")
-            raise RuntimeError("Session not properly initialized")
+
         
         # Create response message
-        logger.info("Sending initial empty message")
         msg = cl.Message(content="", author="Assistant")
         await msg.send()
         
         # Create state for this retrieval process
-        state = cl.user_session.get("state")
-        state.question = message.content
-        result = await chain.ainvoke(state.model_dump())
+        session.model.question = message.content
+        result = await chain.ainvoke(session.model.model_dump())
         
-        # Update state with result
-        state.running_context = result["running_context"]
-        state.chat_history = result["chat_history"]
-
-        state.chat_history.append({"role": "human", "content": message.content})
-        state.chat_history.append({"role": "assistant", "content": result["answer"]})
-        
-        cl.user_session.set("state", state)
+        # Batch updates
+        with session.batch_update() as state:
+            state.running_context = result["running_context"]
+            state.chat_history = result["chat_history"]
+            state.chat_history.append({"role": "human", "content": message.content})
+            state.chat_history.append({"role": "assistant", "content": result["answer"]})
         
         # Update response
-        logger.info("Updating response message")
         msg.content = result["answer"]
         if CONFIG.chat.show_sources:
             msg.elements = prepare_source_elements(result.get("context", []))
         await msg.update()
         
-        logger.info(f"Message processing completed in {perf_counter() - start_time:.2f}s")
         
     except Exception as e:
         logger.error("Error in message processing", exc_info=True)
