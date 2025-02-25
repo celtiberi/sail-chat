@@ -1,3 +1,6 @@
+data/
+.byaldi/
+
 # Python
 __pycache__/
 *.py[cod]
@@ -19,6 +22,7 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
+
 
 # Virtual Environment
 .env
@@ -87,3 +91,5 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg 
+temp.pt
+tensor.bin

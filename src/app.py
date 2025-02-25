@@ -7,12 +7,11 @@ from langchain_chroma import Chroma
 from langchain_huggingface import HuggingFaceEmbeddings
 import sys
 from dataclasses import dataclass, field
-from typing import Optional, Tuple, List, Dict, Any, Set, Callable
+from typing import Optional, Tuple, List, Dict, Any, Set, Callable, Literal
 import logging
 from time import perf_counter
 from langchain_core.documents import Document
 import numpy as np
-from chromadb import PersistentClient
 from langchain_core.retrievers import BaseRetriever
 from pydantic import Field
 from retriever import Retriever
@@ -21,6 +20,8 @@ from langgraph.graph import START, StateGraph
 
 from dataclasses import asdict
 from session_manager import SessionManager
+from chromadb.config import Settings
+from chromadb import HttpClient
 
 # ======================
 # Application Configuration
@@ -37,20 +38,31 @@ class LLMConfig:
 @dataclass
 class RetrieverConfig:
     """Document Retrieval Configuration"""
-    content_collection: str = "forum_content"  # Main content collection
-    hierarchy_collection: str = "forum_hierarchies"  # Hierarchy collection
-    num_hierarchy_results: int = 3  # Number of hierarchy documents to retrieve
-    num_content_results: int = 50  # Number of content documents to retrieve
-    mmr_lambda: float = 0.7  # Balance between relevance and diversity
-    fetch_k: int = 20        # Number of candidates for MMR
+    forum_collection: str = "forum_content"  # Forum content collection
+    book_collection: str = "book_content"    # Book content collection
+    num_forum_results: int = 30  # Number of forum documents to retrieve
+    num_book_results: int = 20   # Number of book documents to retrieve
+    mmr_lambda: float = 0.7      # Balance between relevance and diversity
+    fetch_k: int = 20            # Number of candidates for MMR
 
 @dataclass
 class ChatConfig:
     """Chat History and Context Configuration"""
     max_history_items: int = 20  # Maximum number of messages to keep
     context_window: int = 5  # Number of recent messages for context
-    show_sources: bool = False  # Whether to display source documents
+    show_sources: bool = True  # Whether to display source documents
     show_search_stats: bool = True  # Whether to show number of docs found
+
+@dataclass
+class VectorDBConfig:
+    """Vector Database Configuration"""
+    host: str = "localhost"
+    port: int = 8000
+    collection_location: str = "http://{host}:{port}"  # Template for Chroma URL
+
+    def get_url(self) -> str:
+        """Get formatted Chroma URL"""
+        return self.collection_location.format(host=self.host, port=self.port)
 
 @dataclass
 class AppConfig:
@@ -58,20 +70,23 @@ class AppConfig:
     llm: LLMConfig = field(default_factory=LLMConfig)
     retriever: RetrieverConfig = field(default_factory=RetrieverConfig)
     chat: ChatConfig = field(default_factory=ChatConfig)
+    vectordb: VectorDBConfig = field(default_factory=VectorDBConfig)
     debug_mode: bool = False
     
     def validate(self):
         """Validate configuration values."""
-        if self.retriever.num_hierarchy_results < 1:
-            raise ValueError("num_hierarchy_results must be positive")
-        if self.retriever.num_content_results < 1:
-            raise ValueError("num_content_results must be positive")
+        if self.retriever.num_forum_results < 1:
+            raise ValueError("num_forum_results must be positive")
+        if self.retriever.num_book_results < 1:
+            raise ValueError("num_book_results must be positive")
         if self.chat.max_history_items < 1:
             raise ValueError("max_history_items must be positive")
         if not self.llm.model_name:
             raise ValueError("model_name must be specified")
         if self.llm.temperature < 0 or self.llm.temperature > 1:
             raise ValueError("temperature must be between 0 and 1")
+        if not self.vectordb.host:
+            raise ValueError("host must be specified for vectordb")
 
 @dataclass
 class UserSettings:
@@ -91,9 +106,6 @@ if not os.getenv("GOOGLE_API_KEY"):
         "GOOGLE_API_KEY environment variable is not set. "
         "Please set it in your .env file"
     )
-
-# Get vectordb path relative to current file
-VECTORDB_PATH = Path(__file__).parent.parent.parent / "forum-scrape" / "vectordb"
 
 # Add these constants at the top
 PREVIEW_LENGTH: int = 200  # Length of content previews in logs
@@ -133,22 +145,38 @@ class ListRetriever(BaseRetriever):
     def get_relevant_documents(self, query: str) -> List[Document]:
         return self.documents
 
+def should_continue(state: State) -> Literal["retrieve", "reject"]:
+    """Determine next node based on validation result."""
+    return "retrieve" if state.is_sailing_related else "reject"
+
 def create_chain(retriever: Retriever):
-    """Create a LangGraph chain for retrieval and generation."""
-    # Create the graph with State class as schema
-    graph_builder = StateGraph(State)  # Pass the class, not instance
+    """Create a LangGraph chain with validation."""
+    graph_builder = StateGraph(State)
     
-    # Add nodes for retrieval and generation
+    # Add nodes
+    graph_builder.add_node("validate", retriever.validate_query)
     graph_builder.add_node("analyze", retriever.analyze_query)
     graph_builder.add_node("retrieve", retriever.retrieve)
     graph_builder.add_node("generate", retriever.generate)
+    graph_builder.add_node("reject", retriever.reject_query)
     
     # Add edges
-    graph_builder.add_edge(START, "analyze")
-    graph_builder.add_edge("analyze", "retrieve")
-    graph_builder.add_edge("retrieve", "generate")
+    graph_builder.add_edge(START, "validate")
     
-    # Compile the graph
+    # Add conditional edge after validation
+    graph_builder.add_conditional_edges(
+        "validate",
+        should_continue
+    )
+    
+    # Add remaining edges
+    graph_builder.add_edge("retrieve", "analyze")
+    graph_builder.add_edge("analyze", "generate")
+    
+    # Set reject and generate as finish points
+    graph_builder.set_finish_point("reject")
+    graph_builder.set_finish_point("generate")
+    
     return graph_builder.compile()
 
 @cl.on_chat_start
@@ -174,26 +202,26 @@ async def init():
             model_name="all-MiniLM-L6-v2"
         )
         
-        # Initialize ChromaDB client
-        client = PersistentClient(path=str(VECTORDB_PATH))
-        
-        # Get collections using LangChain embeddings
-        hierarchy_db = Chroma(
-            client=client,
-            collection_name=CONFIG.retriever.hierarchy_collection,
-            embedding_function=embeddings  # Use LangChain embeddings
+        # Create Chroma client for remote server
+        chroma_client = HttpClient(
+            host=f"http://{CONFIG.vectordb.host}:{CONFIG.vectordb.port}",
+            ssl=False
         )
+        logger.info(f"Connected to Chroma at {CONFIG.vectordb.get_url()}")
         
-        content_db = Chroma(
-            client=client,
-            collection_name=CONFIG.retriever.content_collection,
-            embedding_function=embeddings  # Use LangChain embeddings
+        # Initialize vector stores
+        forum_db = Chroma(
+            client=chroma_client,
+            collection_name=CONFIG.retriever.forum_collection,
+            embedding_function=embeddings
         )
+
+        
         logger.info("Vector stores initialized")
         
-        # Create retriever
+        # Create retriever with both collections
         retriever = Retriever(
-            vector_store=content_db,
+            forum_store=forum_db,
             llm=llm,
         )
         
@@ -211,6 +239,37 @@ async def init():
         
     except Exception as e:
         await handle_error(e, "initialization")
+
+def format_docs_as_sources(docs: List[Document]) -> List[cl.Text]:
+    """Format documents as source elements."""
+    def format_content(doc: Document) -> str:
+        """Format content based on document type."""
+        if doc.metadata.get('thread_id'):  # Forum post
+            return (
+                f"**Forum Post**\n"
+                f"Topic: {doc.metadata.get('topic', 'General Discussion')}\n"
+                f"Thread: {doc.metadata.get('thread_id')}\n"
+                f"Forum: {doc.metadata.get('forum_id', 'Unknown')}\n\n"
+                f"{doc.page_content}"
+            )
+        else:  # Book excerpt
+            return (
+                f"**Book: {doc.metadata.get('book_title', 'Sailing Reference')}**\n"
+                f"Chapter: {doc.metadata.get('chapter', 'N/A')}\n"
+                f"Section: {doc.metadata.get('section', 'N/A')}\n"
+                f"Page: {doc.metadata.get('page', 'N/A')}\n\n"
+                f"{doc.page_content}"
+            )
+
+    return [
+        cl.Text(
+            name=f"Source {idx}",
+            content=format_content(doc),
+            display="inline",
+            language="markdown"
+        )
+        for idx, doc in enumerate(docs, 1)
+    ]
 
 @cl.on_message
 async def main(message: cl.Message):
@@ -236,8 +295,8 @@ async def main(message: cl.Message):
         
         # Update response
         msg.content = result["answer"]
-        if CONFIG.chat.show_sources:
-            msg.elements = prepare_source_elements(result.get("context", []))
+        if CONFIG.chat.show_sources and result.get("current_context"):
+            msg.elements = format_docs_as_sources(result["current_context"])
         await msg.update()
         
         
@@ -295,20 +354,6 @@ async def resume_chat():
         type="info"
     ).send()
 
-def prepare_source_elements(docs: List[Document]) -> List[cl.Text]:
-    """Create source elements for display."""
-    return [
-        cl.Text(
-            name=f"Source {idx}",
-            content=f"**Thread {doc.metadata.get('thread_id')} from Forum {doc.metadata.get('forum_id')}**\n"
-                   f"Topic: {doc.metadata.get('topic', 'Unknown Topic')}\n\n"
-                   f"{doc.page_content}",
-            display="inline",
-            language="markdown"
-        )
-        for idx, doc in enumerate(docs, 1)
-    ]
-
 async def handle_error(error: Exception, context: str):
     """Handle errors consistently."""
     error_msg = f"Error during {context}: {str(error)}"
@@ -323,3 +368,8 @@ async def handle_error(error: Exception, context: str):
         author="System",
         type="error"
     ).send()
+
+# Add this at the end of the file
+if __name__ == "__main__":
+    from chainlit.cli import run_chainlit
+    run_chainlit(__file__)

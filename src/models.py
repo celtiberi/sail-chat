@@ -48,7 +48,11 @@ class Search(BaseModel):
 class State(BaseModel):
     question: str | None = None
     query: Search | None = Field(default_factory=Search.default)
+    is_sailing_related: bool | None = None
+    answer: str | None = None
     current_context: List[Document] | None = Field(default_factory=list)  # Documents for current query
     running_context: List[Document] | None = Field(default_factory=list)  # Accumulated context
-    answer: str | None = Field(default="")
-    chat_history: List[Dict[str, str]] | None = Field(default_factory=list)
+    chat_history: List[Dict] | None = Field(default_factory=list)
+    context: List[Document] | None = Field(default_factory=list)
+    visual_context: List[Document] | None = Field(default_factory=list)  # Visual search results
+    visual_files: List[str] | None = Field(default_factory=list)  # Paths to visual results

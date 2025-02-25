@@ -1,0 +1,32 @@
+# Core dependencies
+langchain>=0.1.0
+langchain-core>=0.1.0
+langchain-google-genai>=0.0.5
+langchain-chroma>=0.0.1
+langchain-huggingface>=0.0.1
+langgraph>=0.0.15
+
+# Vector database
+chromadb>=0.4.18
+
+# Image processing
+Pillow>=10.0.0
+pdf2image>=1.16.3
+
+# Utilities
+python-dotenv>=1.0.0
+pydantic>=2.0.0
+typing-extensions>=4.7.0
+numpy>=1.24.0
+httpx>=0.24.0
+
+# Web framework
+chainlit>=0.7.0
+
+# Logging and debugging
+rich>=13.0.0
+srsly>=2.4.6
+
+# Custom modules
+# Note: byaldi should be installed from the custom_modules directory
+# or specified as a git dependency if available publicly 
