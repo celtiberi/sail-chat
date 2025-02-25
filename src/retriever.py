@@ -12,6 +12,9 @@ from visual_index.search import VisualSearch
 import base64
 from PIL import Image
 from io import BytesIO
+import os
+from langchain_chroma import Chroma
+
 logger = logging.getLogger(__name__)
 
 
@@ -49,6 +52,7 @@ BASE_SYSTEM_TEMPLATE = """
     7. Do not use phrases like "The text mentions".  Talk as though all of the information is yours so that there is no confusion.
     9. Do not use phrases like "described in AN114" or "waypoint AN1174".  The user cannot see what you are referring to so you must describe it.
     10. Do not quote passages from the context.  Just use the information to answer the question.
+    11. When asked for help with a sailing route, give as much details as possible.  What to be wary of, prevailing winds, weather conditions, best times of year for the trip, and anything else that is important.
     11. Format your response using these markdown guidelines:
       - Use #### for main headings (smaller and cleaner)
       - Use ##### for subsections
@@ -74,8 +78,14 @@ class RetrieverConfig:
     system_template: str = ""
     chat: dict = Field(default_factory=dict)
     forum_collection: str = "forum_content"
-    num_forum_results: int = 30
-    num_book_results: int = 20
+    num_forum_results: int = 10
+    
+    # ChromaDB configuration
+    local_db_path: str = "./chroma_db"
+    
+    def get_db_path(self) -> str:
+        """Get absolute path to ChromaDB directory"""
+        return os.path.abspath(self.local_db_path)
 
 # Create a single instance of the config with formatted templates
 CONFIG = RetrieverConfig(
@@ -94,12 +104,30 @@ class Retriever:
     
     def __init__(
         self,
-        forum_store: VectorStore,
         llm: BaseChatModel,
+        embedding_model: str = "all-MiniLM-L6-v2",
+        visual_search=None,  # Visual search instance
+        forum_store=None     # ChromaDB instance
     ):
-        self.forum_store = forum_store
+        """
+        Initialize the retriever with LLM and optional shared resources.
+        
+        Args:
+            llm: The language model to use for query analysis and response generation
+            embedding_model: Name of the embedding model (only used if forum_store not provided)
+            visual_search: Optional shared VisualSearch instance
+            forum_store: Optional shared ChromaDB instance
+        """
         self.llm = llm
-        self.visual_search = VisualSearch()
+        self.visual_search = visual_search
+        
+        # Use the provided forum_store or raise an error
+        if forum_store:
+            self.forum_store = forum_store
+            logger.info("Using provided ChromaDB instance")
+        else:
+            logger.warning("No ChromaDB instance provided - retrieval functionality will be limited")
+            self.forum_store = None
         
         # Create query analysis prompt
         self.query_prompt = ChatPromptTemplate.from_messages([
@@ -116,6 +144,7 @@ class Retriever:
 
     def validate_query(self, state: State) -> Dict:
         """Check if query is sailing-related."""
+        logger.info("Validate query")
         prompt = "Is this question in the general area of something that would concern a sailor or boater? Answer only 'yes' or 'no': " + state.question
         #  response = self.llm.invoke(prompt).content.lower().strip()
         # return {"is_sailing_related": response == "yes"}
@@ -135,12 +164,13 @@ class Retriever:
                 self.query_prompt.format(question=state.question)
             )
             logger.info(f"Generated search query: {query}")
-            return {"query": query}
+            return {
+                "query": query
+                }
         except Exception as e:
             logger.error(f"Error analyzing query: {str(e)}", exc_info=True)
             return {
                 "query": {
-                    "query": state.question,
                     "topics": "General Sailing Forum"
                 }
             }
@@ -148,19 +178,20 @@ class Retriever:
     async def retrieve(self, state: State) -> Dict[str, List[Document]]:
         """Retrieve relevant documents from both forum and book collections."""
         try:
+            logger.info("Retrieving query")
             logger.info(f"Retrieving documents for query: {state.query}")
             
             # Get forum documents
-            forum_docs = await self.forum_store.asimilarity_search(
-                state.query.query,
-                k=CONFIG.num_forum_results,
-                filter={"topics": state.query.topics}
-            )
-
-            # setting to empty for testing
             forum_docs = []
-            logger.info(f"Retrieved {len(forum_docs)} forum docs")
-            
+            if self.forum_store:
+                forum_docs = await self.forum_store.asimilarity_search(
+                    query=state.query.query,
+                    k=CONFIG.num_forum_results,
+                    filter={"topics": state.query.topics}
+                )
+                logger.info(f"Retrieved {len(forum_docs)} forum docs")
+            else:
+                logger.warning("Forum store not available - skipping forum retrieval")
             
             # Get visual search results if available
             visual_docs = []
@@ -168,7 +199,7 @@ class Retriever:
             if self.visual_search:
                 try:
                     results, files = self.visual_search.search(
-                        query=state.question,
+                        query=state.query.query,
                         k=CONFIG.visual_doc_search_k  # Use the configured value
                     )
                     # Convert results to Documents
@@ -216,6 +247,8 @@ class Retriever:
                     logger.info(f"Retrieved {len(visual_docs)} visual results")
                 except Exception as e:
                     logger.error(f"Error in visual search: {str(e)}", exc_info=True)
+            else:
+                logger.info("Visual search not available - skipping visual retrieval")
             
 
             

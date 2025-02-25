@@ -1,6 +1,6 @@
 data/
 .byaldi/
-
+.files/
 # Python
 __pycache__/
 *.py[cod]
@@ -93,3 +93,8 @@ wheels/
 *.egg 
 temp.pt
 tensor.bin
+chroma_db/a4279b5d-fce2-43d7-b39e-778e0af2a296/data_level0.bin
+chroma_db/a4279b5d-fce2-43d7-b39e-778e0af2a296/header.bin
+chroma_db/a4279b5d-fce2-43d7-b39e-778e0af2a296/index_metadata.pickle
+chroma_db/a4279b5d-fce2-43d7-b39e-778e0af2a296/length.bin
+chroma_db/a4279b5d-fce2-43d7-b39e-778e0af2a296/link_lists.bin

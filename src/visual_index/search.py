@@ -12,6 +12,7 @@ import logging
 from pathlib import Path
 from typing import List, Dict, Optional, Generator, Union, Tuple, Any
 import argparse
+import threading
 
 from pdf2image import convert_from_path, pdfinfo_from_path
 from rich.logging import RichHandler
@@ -27,8 +28,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))  # Add project root
 from custom_modules.byaldi import RAGMultiModalModel
 from byaldi.objects import Result
 
-# Get workspace root path
-WORKSPACE_ROOT = Path(os.getenv('WORKSPACE_ROOT', '/Users/patrickcremin/repo/chat'))
+# Get workspace root path programmatically
+WORKSPACE_ROOT = Path(__file__).parent.parent.parent.absolute()
 
 # Ensure index directory exists
 INDEX_ROOT = WORKSPACE_ROOT / '.byaldi'
@@ -71,27 +72,61 @@ class Config:
 class VisualSearch:
     """Vectorizes PDFs (visually) using Byaldi, storing indexes on disk."""
     
-    def __init__(self, index_name: str = "visual_books"):
-        """Initialize the vectorizer with configurable paths.
+    # Class-level variables for shared resources
+    _index_instance = None
+    _index_lock = threading.RLock()  # Lock for initializing the index
+    
+    @classmethod
+    def initialize_shared_index(cls, index_name: str = "visual_books"):
+        """Initialize the shared index that will be used by all instances.
+        
+        This should be called once at application startup.
         
         Args:
-            pdf_dir: Directory containing PDFs and metadata
             index_name: Name of the Byaldi index
         """
-        self.index_name = 'visual_books'
-        self.index_root = Config.INDEX_ROOT
-        self.index_path = self.index_root / self.index_name
-
-        # Use class-level singleton pattern to ensure one index instance
-        if not hasattr(VisualSearch, '_index_instance'):
-            if self.index_root.exists():
-                VisualSearch._index_instance = RAGMultiModalModel.from_index(
-                    index_path=self.index_name)
-            else:
-                raise FileNotFoundError(f"Index directory {self.index_root} does not exist. Please create it first.")
+        with cls._index_lock:
+            if cls._index_instance is None:
+                index_root = INDEX_ROOT
+                if index_root.exists():
+                    logger.info("Initializing shared RAGMultiModalModel from index")
+                    cls._index_instance = RAGMultiModalModel.from_index(
+                        index_path=index_name)
+                    logger.info("Shared RAGMultiModalModel initialized successfully")
+                else:
+                    raise FileNotFoundError(f"Index directory {index_root} does not exist. Please create it first.")
+                
+    @classmethod
+    def close_shared_index(cls):
+        """Close the shared index and free resources."""
+        with cls._index_lock:
+            if cls._index_instance is not None:
+                logger.info("Closing shared RAGMultiModalModel")
+                del cls._index_instance
+                cls._index_instance = None
+                gc.collect()
+                logger.info("Shared RAGMultiModalModel closed successfully")
+    
+    def __init__(self, index_name: str = "visual_books"):
+        """Initialize a new VisualSearch instance that uses the shared index.
         
-        self.RAG = VisualSearch._index_instance
-        self.doc_ids_to_file_names = self.RAG.get_doc_ids_to_file_names()
+        Args:
+            index_name: Name of the Byaldi index (used only if shared index not initialized)
+        """
+        self.index_name = index_name
+        self.index_root = Config.INDEX_ROOT
+        
+        # Initialize shared index if not already done
+        with VisualSearch._index_lock:
+            if VisualSearch._index_instance is None:
+                VisualSearch.initialize_shared_index(index_name)
+            
+            # Get a reference to the shared index
+            self.RAG = VisualSearch._index_instance
+            
+            # Each instance has its own copy of doc_ids_to_file_names
+            # This is a read-only operation so it's thread-safe
+            self.doc_ids_to_file_names = self.RAG.get_doc_ids_to_file_names()
 
     def search(
         self,
@@ -102,6 +137,8 @@ class VisualSearch:
         metadata_contains: Optional[Dict[str, str]] = None
     ) -> tuple[List[Result], List[Path]]:
         """Search the indexed PDFs for a given query with optional metadata filtering.
+        
+        This method is thread-safe and can be called concurrently from multiple instances.
         
         Args:
             query: Search query string
@@ -115,7 +152,15 @@ class VisualSearch:
         """
         if k < 1:
             raise ValueError("k must be positive")
-        if not self.doc_ids_to_file_names:  # Move to __init__
+        
+        # Ensure we have access to the shared index
+        if VisualSearch._index_instance is None:
+            raise RuntimeError("Shared index not initialized")
+            
+        # No need for a lock during search since RAG.search is read-only
+        # and each instance has its own doc_ids_to_file_names
+        
+        if not self.doc_ids_to_file_names:
             self.doc_ids_to_file_names = self.RAG.get_doc_ids_to_file_names()
         if not self.doc_ids_to_file_names:
             raise ValueError("No documents indexed")
@@ -123,6 +168,9 @@ class VisualSearch:
         # Get more results than needed to allow for filtering
         has_filters = any([metadata_filters, metadata_ranges, metadata_contains])
         extra_k = k * Config.FILTER_MULTIPLIER if has_filters else k
+        logger.debug(f"Performing search with query: {query}, k={extra_k}")
+        
+        # The search operation itself is thread-safe as it's read-only
         results: Union[List[Result], List[List[Result]]] = self.RAG.search(query, k=extra_k)
         
         # Handle nested results
@@ -153,8 +201,9 @@ class VisualSearch:
         else:
             files = [self.doc_ids_to_file_names[r.doc_id] for r in results]
         
+        logger.debug(f"Search completed, found {len(results)} results")
         return results, files
-        
+
     def _filter_results(
         self,
         results: List[Result],
@@ -207,9 +256,14 @@ class VisualSearch:
         return filtered
 
     def close(self):
-        """Properly close and cleanup resources."""
-        if hasattr(self, 'RAG'):
-            del self.RAG
+        """Properly close and cleanup instance resources.
+        
+        Note: This does not close the shared index, only instance-specific resources.
+        To close the shared index, use VisualSearch.close_shared_index().
+        """
+        # Clear instance-specific resources
+        self.doc_ids_to_file_names = None
+        self.RAG = None  # Remove reference to shared index
         gc.collect()
 
     def __enter__(self):
