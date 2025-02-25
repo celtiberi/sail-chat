@@ -28,11 +28,11 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))  # Add project root
 from custom_modules.byaldi import RAGMultiModalModel
 from byaldi.objects import Result
 
-# Get workspace root path programmatically
-WORKSPACE_ROOT = Path(__file__).parent.parent.parent.absolute()
+# Import centralized configuration
+from config import VISUAL_CONFIG as Config, WORKSPACE_ROOT
 
 # Ensure index directory exists
-INDEX_ROOT = WORKSPACE_ROOT / '.byaldi'
+INDEX_ROOT = Config.INDEX_ROOT
 INDEX_ROOT.mkdir(parents=True, exist_ok=True)
 
 class PDFMetadata(BaseModel):
@@ -58,16 +58,6 @@ logging.basicConfig(
     handlers=[RichHandler(rich_tracebacks=True)]
 )
 logger = logging.getLogger(__name__)
-
-class Config:
-    """Centralized configuration settings."""
-    DPI = 300
-    CHUNK_SIZE = 10
-    MODEL_NAME = "vidore/colqwen2-v1.0"
-    DEVICE = "cpu"
-    IMAGE_FORMAT = "png"
-    INDEX_ROOT = INDEX_ROOT
-    FILTER_MULTIPLIER = 3  # Get 3x results when filtering to ensure enough after filtering
 
 class VisualSearch:
     """Vectorizes PDFs (visually) using Byaldi, storing indexes on disk."""

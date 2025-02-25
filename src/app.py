@@ -1,10 +1,8 @@
 import os
 from pathlib import Path
-from dotenv import load_dotenv
 import chainlit as cl
 from langchain_google_genai import ChatGoogleGenerativeAI
 import sys
-from dataclasses import dataclass, field
 from typing import Optional, Tuple, List, Dict, Any, Set, Callable, Literal
 import logging
 from time import perf_counter
@@ -12,86 +10,34 @@ from langchain_core.documents import Document
 import numpy as np
 from langchain_core.retrievers import BaseRetriever
 from pydantic import Field
-from retriever import Retriever, CONFIG as RETRIEVER_CONFIG
+from retriever import Retriever
 from models import State
 from langgraph.graph import START, StateGraph
 from visual_index.search import VisualSearch
 from langchain_chroma import Chroma
 from langchain_huggingface import HuggingFaceEmbeddings
+import atexit
 
 from dataclasses import asdict
 from session_manager import SessionManager
 
-# ======================
-# Application Configuration
-# ======================
+# Import centralized configuration
+from config import (
+    APP_CONFIG as CONFIG,
+    RETRIEVER_CONFIG,
+    VISUAL_CONFIG,
+    UserSettings,
+    WORKSPACE_ROOT
+)
 
-@dataclass
-class LLMConfig:
-    """Language Model Configuration"""
-    model_name: str = "gemini-2.0-flash"  # Model to use
-    temperature: float = 0.7  # Higher = more creative, Lower = more focused
-    top_p: float = 0.8  # Nucleus sampling parameter
-    max_tokens: Optional[int] = None  # Max output length (None = model default)
-
-@dataclass
-class ChatConfig:
-    """Chat History and Context Configuration"""
-    max_history_items: int = 20  # Maximum number of messages to keep
-    context_window: int = 5  # Number of recent messages for context
-
-@dataclass
-class AppConfig:
-    """Main Application Configuration"""
-    llm: LLMConfig = field(default_factory=LLMConfig)
-    chat: ChatConfig = field(default_factory=ChatConfig)
-    
-    def validate(self):
-        """Validate configuration values."""
-        if self.chat.max_history_items < 1:
-            raise ValueError("max_history_items must be positive")
-        if not self.llm.model_name:
-            raise ValueError("model_name must be specified")
-        if self.llm.temperature < 0 or self.llm.temperature > 1:
-            raise ValueError("temperature must be between 0 and 1")
-
-@dataclass
-class UserSettings:
-    show_sources: bool = False
-    show_stats: bool = True
-    debug_mode: bool = False
-
-    def __init__(self):
-        # Initialize with default values
-        self.show_sources = True
-        self.show_stats = True
-        self.debug_mode = False
-
-# Create configuration instance
-CONFIG = AppConfig()
-
-# Load environment variables
-if not load_dotenv():
-    print("Warning: No .env file found", file=sys.stderr)
-
-# Validate required environment variables
-if not os.getenv("GOOGLE_API_KEY"):
-    raise ValueError(
-        "GOOGLE_API_KEY environment variable is not set. "
-        "Please set it in your .env file"
-    )
-
-# Add these constants at the top
-PREVIEW_LENGTH: int = 200  # Length of content previews in logs
-LOG_SEPARATOR: str = "=" * 50  # Separator for log sections
-
-# Add at top of file after other imports
+# Configure logging
+LOG_SEPARATOR = "=" * 50
 logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
+    level=os.getenv("LOG_LEVEL", "INFO"),
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     handlers=[
-        logging.StreamHandler(sys.stdout),
-        logging.FileHandler('forum_chat.log')
+        logging.StreamHandler(),
+        logging.FileHandler("forum_chat.log")
     ]
 )
 logger = logging.getLogger(__name__)
@@ -358,8 +304,6 @@ if __name__ == "__main__":
     from chainlit.cli import run_chainlit
     
     # Register shutdown handler to clean up resources
-    import atexit
-    
     def cleanup_resources():
         """Clean up shared resources when the application exits."""
         logger.info("Cleaning up shared resources...")

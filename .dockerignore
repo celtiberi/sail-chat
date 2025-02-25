@@ -1,0 +1,59 @@
+# Git
+.git
+.gitignore
+
+# Data directories (these will be mounted as volumes)
+data/
+.byaldi/
+chroma_db/
+
+# Environment
+.env
+.venv
+env/
+venv/
+ENV/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Logs
+*.log
+logs/
+forum_chat.log
+
+# Test files
+test_*.py
+*.bin
+*.pt
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Conda
+.conda/
+
+# Misc
+.DS_Store
+Thumbs.db 

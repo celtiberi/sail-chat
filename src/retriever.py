@@ -14,9 +14,12 @@ from PIL import Image
 from io import BytesIO
 import os
 from langchain_chroma import Chroma
+from pathlib import Path
+
+# Import centralized configuration
+from config import RETRIEVER_CONFIG as CONFIG, WORKSPACE_ROOT
 
 logger = logging.getLogger(__name__)
-
 
 # Get list of topics from the Literal type
 FORUM_TOPICS_LIST = list(get_args(ForumTopic))
@@ -62,38 +65,6 @@ BASE_SYSTEM_TEMPLATE = """
       - Use > for tips and explanations
       - Keep paragraphs short and well-spaced
 """
-
-
-
-
-@dataclass
-class RetrieverConfig:
-    """Configuration for the Retriever"""
-    metadata_search_k: int = 15    # Number of docs to retrieve with metadata filter
-    semantic_search_k: int = 15    # Number of docs to retrieve with semantic search
-    visual_doc_search_k: int = 5   # Number of visual docs to retrieve
-    doc_window_size: int = 30      # Maximum number of docs to keep in context window
-    chat_window_size: int = 10     # Number of message pairs to keep in chat history
-    query_template: str = ""
-    system_template: str = ""
-    chat: dict = Field(default_factory=dict)
-    forum_collection: str = "forum_content"
-    num_forum_results: int = 10
-    
-    # ChromaDB configuration
-    local_db_path: str = "./chroma_db"
-    
-    def get_db_path(self) -> str:
-        """Get absolute path to ChromaDB directory"""
-        return os.path.abspath(self.local_db_path)
-
-# Create a single instance of the config with formatted templates
-CONFIG = RetrieverConfig(
-    query_template=BASE_QUERY_TEMPLATE % {
-        "topics": "\n".join(f"- {topic}" for topic in FORUM_TOPICS_LIST)
-    },
-    system_template=BASE_SYSTEM_TEMPLATE
-)
 
 class RetrievalError(Exception):
     """Custom error for retrieval failures"""
@@ -198,10 +169,18 @@ class Retriever:
             visual_files = []
             if self.visual_search:
                 try:
-                    results, files = self.visual_search.search(
+                    results, raw_files = self.visual_search.search(
                         query=state.query.query,
                         k=CONFIG.visual_doc_search_k  # Use the configured value
                     )
+                    # Rewrite paths to be relative to working directory
+                    files = []
+                    for file in raw_files:
+                        # Split at data/pdfs and take the second part
+                        relative_path = str(file).split("data/pdfs")[-1]
+                        # Create new path from workspace root instead of current working directory
+                        files.append(str(WORKSPACE_ROOT / "data/pdfs" / relative_path.lstrip("/")))
+                    
                     # Convert results to Documents
                     for result, file in zip(results, files):
                         # Get additional metadata from Byaldi

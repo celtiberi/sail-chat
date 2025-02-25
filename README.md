@@ -109,4 +109,65 @@ To extend the assistant's capabilities:
 
 ## Contributing
 
-[Guidelines for contributing to the project] 
+[Guidelines for contributing to the project]
+
+## Docker Deployment
+
+This application can be run in a Docker container for easier deployment and consistency across environments.
+
+### Prerequisites
+
+- Docker and Docker Compose installed on your system
+- Google API key for the language model
+
+### Running with Docker Compose
+
+1. Build and start the container:
+
+```bash
+docker-compose up -d
+```
+
+This will:
+- Build the Docker image
+- Mount the data directories as volumes
+- Start the application on port 8080
+
+2. Access the application at http://localhost:8080
+
+### Environment Variables
+
+You can set environment variables in the following ways:
+- In a `.env` file in the project root (for docker-compose)
+- Directly in the `docker-compose.yml` file
+- By passing them to the `docker-compose up` command:
+
+```bash
+GOOGLE_API_KEY=your_key_here CHAINLIT_AUTH_SECRET=your_secret docker-compose up -d
+```
+
+### Building the Docker Image Manually
+
+If you prefer to build and run the Docker image manually:
+
+```bash
+# Build the image
+docker build -t sailing-assistant .
+
+# Run the container
+docker run -p 8080:8080 \
+  -v $(pwd)/data:/app/data \
+  -v $(pwd)/.byaldi:/app/.byaldi \
+  -v $(pwd)/chroma_db:/app/chroma_db \
+  -e GOOGLE_API_KEY=your_key_here \
+  sailing-assistant
+```
+
+### Data Persistence
+
+The Docker setup uses volume mounts to persist data:
+- `./data:/app/data` - Application data
+- `./.byaldi:/app/.byaldi` - Byaldi index
+- `./chroma_db:/app/chroma_db` - ChromaDB data
+
+This ensures that your data remains intact even if the container is removed. 
