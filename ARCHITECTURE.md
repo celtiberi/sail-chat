@@ -1,43 +1,26 @@
-# Application Architecture
+# Platform-Adaptive Architecture
 
-This document outlines the key architectural components of the application and how they interact, with a focus on the platform-adaptive design.
+This document describes the architecture of the application, focusing on how it adapts to different platforms (Apple Silicon and GPU environments).
 
-## Recent Updates
+## Architecture Overview
 
-### Bug Fixes (February 2025)
-
-Fixed an issue with the custom Byaldi module where:
-- The `model_cls` parameter was being incorrectly passed to the parent class's `from_index` method
-- Duplicate `device` parameters were being passed to the `CustomColPaliModel` constructor
-- Import paths were updated to use absolute imports (`src.config` instead of `config`)
-
-These changes ensure that the application can properly initialize the visual search index on Apple Silicon.
-
-## High-Level Architecture
+The application has been designed with a platform-adaptive architecture that automatically detects the environment it's running in and uses the appropriate implementation:
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                      Application Layer                       │
-│                                                             │
-│  ┌─────────────┐    ┌─────────────┐    ┌─────────────────┐  │
-│  │   Chainlit  │    │    FastAPI  │    │  Other Services │  │
-│  └─────────────┘    └─────────────┘    └─────────────────┘  │
-└───────────────────────────┬─────────────────────────────────┘
-                            │
-┌───────────────────────────▼─────────────────────────────────┐
-│                      Business Logic                          │
-│                                                             │
-│  ┌─────────────┐    ┌─────────────┐    ┌─────────────────┐  │
-│  │  LLM Logic  │    │  Retrieval  │    │  Visual Search  │  │
-│  └─────────────┘    └─────────────┘    └─────────────────┘  │
-└───────────────────────────┬─────────────────────────────────┘
-                            │
-┌───────────────────────────▼─────────────────────────────────┐
-│                    Platform Abstraction                      │
-│                                                             │
-│  ┌─────────────────────────────────────────────────────┐    │
-│  │               IndexProvider                         │    │
-│  └─────────────────────────────────────────────────────┘    │
+┌───────────────────────────────────────────────────────────────┐
+│                      Application Layer                         │
+│                                                               │
+│  ┌─────────────────┐  ┌─────────────────┐  ┌───────────────┐  │
+│  │    Retriever    │  │  Visual Search  │  │  Other Comps  │  │
+│  └────────┬────────┘  └────────┬────────┘  └───────────────┘  │
+└───────────┼─────────────────────┼─────────────────────────────┘
+            │                     │
+┌───────────▼─────────────────────▼─────────────────────────────┐
+│                    Platform Abstraction                        │
+│                                                               │
+│  ┌─────────────────────────────────────────────────────────┐  │
+│  │               IndexProvider                             │  │
+│  └─────────────────────────────────────────────────────────┘  │
 └───────────────────────────┬─────────────────────────────────┘
                             │
                 ┌───────────▼───────────┐
@@ -122,6 +105,54 @@ results = search.search("path/to/image.jpg")
 - Lets the implementation decide the appropriate device based on the platform
 - Provides configuration classes for different components
 
+## Docker Environment
+
+The application can run in two Docker environments:
+
+### 1. CPU Mode (`docker-compose.yml`)
+
+**Purpose**: Optimized for Apple Silicon and other CPU-only environments.
+
+**Key Features**:
+- Uses the `continuumio/miniconda3:latest` base image
+- Installs PyTorch CPU-only version
+- Sets `CUDA_VISIBLE_DEVICES=-1` to force CPU usage
+- Optimizes memory usage for CPU environments
+
+**Configuration**:
+```yaml
+# Key environment variables in docker-compose.yml
+environment:
+  - CUDA_VISIBLE_DEVICES=-1
+  - VISUAL_DEVICE=cpu
+```
+
+### 2. GPU Mode (`docker-compose.gpu.yml`)
+
+**Purpose**: Optimized for NVIDIA GPU environments.
+
+**Key Features**:
+- Uses the `nvidia/cuda:12.1.1-cudnn8-runtime-ubuntu22.04` base image
+- Installs PyTorch with CUDA support
+- Configures NVIDIA runtime for Docker
+- Sets GPU-specific environment variables
+
+**Configuration**:
+```yaml
+# Key settings in docker-compose.gpu.yml
+environment:
+  - CUDA_VISIBLE_DEVICES=0
+  - PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:128
+  - VISUAL_DEVICE=cuda
+deploy:
+  resources:
+    reservations:
+      devices:
+        - driver: nvidia
+          count: 1
+          capabilities: [gpu]
+```
+
 ## Data Flow
 
 1. **User Request**: The user submits a query through the application interface.
@@ -137,18 +168,6 @@ results = search.search("path/to/image.jpg")
    - The standard implementation for GPU environments
 
 6. **Result Processing**: The search results are processed and returned to the user.
-
-## Docker Environment
-
-The application can run in two Docker environments:
-
-1. **CPU Mode** (`docker-compose.yml`):
-   - Uses the CPU-optimized implementation
-   - Suitable for Apple Silicon and other CPU-only environments
-
-2. **GPU Mode** (`docker-compose.gpu.yml`):
-   - Uses NVIDIA CUDA for acceleration
-   - Suitable for RunPod and other GPU-enabled environments
 
 ## Memory Management
 
@@ -173,10 +192,44 @@ The application includes comprehensive logging to track:
 - Memory usage
 - Performance metrics
 
+## Recent Bug Fixes
+
+### Model Initialization Issue
+
+Fixed an issue with the custom Byaldi module where:
+- The `model_cls` parameter was being incorrectly passed to the parent class's `from_index` method
+- Duplicate `device` parameters were being passed to the `CustomColPaliModel` constructor
+- Import paths were updated to use absolute imports (`src.config` instead of `config`)
+
+These changes ensure that the application can properly initialize the visual search index on Apple Silicon.
+
+## Utility Scripts
+
+### 1. Environment Checker (`check_environment.py`)
+
+**Purpose**: Analyzes the system and recommends the appropriate Docker configuration.
+
+**Key Features**:
+- Detects platform type (Apple Silicon, Linux with GPU, etc.)
+- Checks for NVIDIA GPU and CUDA availability
+- Verifies Docker and NVIDIA Container Toolkit installation
+- Provides recommendations based on the detected environment
+
+### 2. Container Manager (`restart_containers.sh`)
+
+**Purpose**: Simplifies container management with automatic platform detection.
+
+**Key Features**:
+- Automatically detects the system type
+- Stops and removes existing containers
+- Starts containers with the appropriate configuration
+- Provides feedback and logs for troubleshooting
+
 ## Future Enhancements
 
 Potential areas for future architectural improvements:
 - Further abstraction of platform-specific components
 - Dynamic model loading based on available resources
 - Performance monitoring and auto-scaling
-- Additional optimizations for specific hardware configurations 
+- Additional optimizations for specific hardware configurations
+- Support for multi-GPU environments 

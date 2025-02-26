@@ -7,17 +7,19 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.vectorstores import VectorStore
 import logging
 from dataclasses import dataclass
-from models import ForumTopic, State, Search
-from visual_index.search import VisualSearch
+from src.models import ForumTopic, State, Search
+from src.visual_index.search import VisualSearch
 import base64
 from PIL import Image
 from io import BytesIO
 import os
 from langchain_chroma import Chroma
 from pathlib import Path
+import asyncio
+import chainlit as cl
 
 # Import centralized configuration
-from config import RETRIEVER_CONFIG as CONFIG, WORKSPACE_ROOT
+from src.config import RETRIEVER_CONFIG as CONFIG, WORKSPACE_ROOT
 
 logger = logging.getLogger(__name__)
 
@@ -113,16 +115,29 @@ class Retriever:
             ("human", "{question}")
         ])
 
-    def validate_query(self, state: State) -> Dict:
-        """Check if query is sailing-related."""
-        logger.info("Validate query")
-        prompt = "Is this question in the general area of something that would concern a sailor or boater? Answer only 'yes' or 'no': " + state.question
-        #  response = self.llm.invoke(prompt).content.lower().strip()
-        # return {"is_sailing_related": response == "yes"}
-        return {"is_sailing_related": True}
-        
     def reject_query(self, state: State) -> Dict:
         """Handle non-sailing queries."""
+        # The validate step should already be created and stored in the state
+        # We just need to update it with the rejection message
+        if hasattr(state, 'steps') and 'reject' in state.steps:
+            step = state.steps['reject']
+            step.output = "Query rejected as it's not sailing-related"
+            
+            # Update the step
+            asyncio.create_task(step.update())
+            
+            # Remove the step after a short delay
+            async def remove_step_after_delay():
+                await asyncio.sleep(1)  # Short delay to let users see the rejection
+                await step.remove()
+                logger.info("Reject step removed")
+            
+            asyncio.create_task(remove_step_after_delay())
+            
+            # Mark the step as updated
+            if hasattr(state, 'updated_steps'):
+                state.updated_steps['reject'] = True
+        
         response = "I can only answer questions about boating and maritime topics. Please rephrase your question to focus on boating-related matters."
         return {"answer": response}
 
@@ -130,10 +145,35 @@ class Retriever:
         """Generate optimized search query with metadata filters."""
         try:
             logger.info("Analyzing query")
+            
+            # Create and send the analyze step without ephemeral parameter
+            analyze_step = cl.Step(name="Analyze Query", type="tool", show_input=True)
+            analyze_step.input = state.question
+            await analyze_step.send()
+            
+            # Store the step in the state
+            state.steps["analyze"] = analyze_step
+            
+            # Update the analyze step
+            analyze_step.output = "Analyzing query to generate optimized search terms..."
+            await analyze_step.update()
+            
             structured_llm = self.llm.with_structured_output(Search)
             query = await structured_llm.ainvoke(
                 self.query_prompt.format(question=state.question)
             )
+            
+            # Update step with the result
+            analyze_step.output = f"Generated search query: {query.query} in topic: {query.topics}"
+            await analyze_step.update()
+                
+            # Mark the step as updated
+            if hasattr(state, 'updated_steps'):
+                state.updated_steps['analyze'] = True
+            
+            await analyze_step.remove()
+            logger.info(f"Analyze step removed")
+
             logger.info(f"Generated search query: {query}")
             return {
                 "query": query
@@ -151,6 +191,18 @@ class Retriever:
         try:
             logger.info("Retrieving query")
             logger.info(f"Retrieving documents for query: {state.query}")
+            
+            # Create and send the retrieve step without ephemeral parameter
+            retrieve_step = cl.Step(name="Retrieve Documents", type="tool", show_input=True)
+            retrieve_step.input = f"Query: {state.query.query}, Topic: {state.query.topics}"
+            await retrieve_step.send()
+            
+            # Store the step in the state
+            state.steps["retrieve"] = retrieve_step
+            
+            # Update the retrieve step
+            retrieve_step.output = f"Retrieving documents for: {state.query.query}"
+            await retrieve_step.update()
             
             # Get forum documents
             forum_docs = []
@@ -245,6 +297,17 @@ class Retriever:
             
             logger.info(f"Combined into {len(combined_docs)} unique documents")
             
+            # Update step with the result
+            retrieve_step.output = f"Retrieved {len(combined_docs)} documents"
+            await retrieve_step.update()
+                
+            # Mark the step as updated
+            if hasattr(state, 'updated_steps'):
+                state.updated_steps['retrieve'] = True
+            
+            await retrieve_step.remove()
+            logger.info(f"Retrieve step removed")
+
             return {
                 "current_context": combined_docs,
                 "visual_context": visual_docs,
@@ -263,6 +326,17 @@ class Retriever:
         try:
             logger.info("Generating response from context")
             logger.info(f"Initial state - current_context: {len(state.current_context)} docs, running_context: {len(state.running_context)} docs")
+            
+            # Create and send the generate step without ephemeral parameter
+            generate_step = cl.Step(name="Generate Response", type="run", show_input=False)
+            await generate_step.send()
+            
+            # Store the step in the state
+            state.steps["generate"] = generate_step
+            
+            # Update the generate step
+            generate_step.output = "Generating response from retrieved documents..."
+            await generate_step.update()
             
             # Remove docs from running context that are in current context
             current_ids = {doc.id for doc in state.current_context}
@@ -330,12 +404,52 @@ class Retriever:
             # Format the prompt to get the messages
             messages = await multimodal_prompt.ainvoke({})
             
-            # Get response from LLM using the formatted messages
-            response = await self.llm.ainvoke(messages)
+            # Update generate step to show we're about to stream
+            generate_step.output = "Preparing to stream response..."
+            await generate_step.update()
+                
+            # Mark the step as updated
+            if hasattr(state, 'updated_steps'):
+                state.updated_steps['generate'] = True
+            
+            # Initialize an empty response
+            full_response = ""
+            
+            # Get the stream
+            stream = self.llm.astream(messages)
+            
+            # Flag to track if streaming has started
+            streaming_started = False
+            
+            # Stream the response
+            async for chunk in stream:
+                if chunk.content:
+                    # If this is the first chunk with content, update and remove the step
+                    if not streaming_started:
+                        streaming_started = True
+                        logger.info("Streaming started, updating and removing generate step")
+                        
+                        # Final update to the step
+                        generate_step.output = "Response generation started, streaming to message..."
+                        await generate_step.update()
+                        
+                        # Remove the step now that streaming has started
+                        await generate_step.remove()
+                        logger.info("Generate step removed at start of streaming")
+                    
+                    # Stream to the message for visibility during generation                    
+                    await state.current_message.stream_token(chunk.content)
+                    
+                    # Collect the full response
+                    full_response += chunk.content
+            
+            logger.info("Response streaming completed")
+            response_content = full_response
+                
             logger.info("Response generated successfully")
             
             return {
-                "answer": response.content,
+                "answer": response_content,
                 "running_context": combined_docs,
                 "chat_history": chat_history,
                 "visual_context": state.visual_context,

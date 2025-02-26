@@ -1,15 +1,26 @@
+version: '3.8'
+
 services:
-  sailing-assistant:
+  app:
     build:
       context: .
       dockerfile: Dockerfile.gpu
-    command: chainlit run src/app.py --port 8000 --host 0.0.0.0
+    image: sailing-assistant-gpu
+    container_name: sailing-assistant-gpu
+    restart: unless-stopped
     ports:
       - "8000:8000"
     volumes:
-      - ./data:/app/data
       - ./.byaldi:/app/.byaldi
+      - ./data:/app/data
+      - ./logs:/app/logs
       - ./chroma_db:/app/chroma_db
+    environment:
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY}
+      - VISUAL_DEVICE=cuda
+      - CUDA_VISIBLE_DEVICES=0
+      - PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:128
+      - LOG_LEVEL=INFO
     deploy:
       resources:
         reservations:
@@ -17,16 +28,9 @@ services:
             - driver: nvidia
               count: 1
               capabilities: [gpu]
-    environment:
-      - GOOGLE_API_KEY=${GOOGLE_API_KEY}
-      - LOG_LEVEL=INFO
-      - FORUM_COLLECTION=forum_content
-      - VISUAL_INDEX_PATH=.byaldi
-      - VISUAL_MODEL_NAME=vidore/colqwen2-v1.0
-      - VISUAL_DEVICE=cuda
-      - CHAINLIT_HOST=0.0.0.0
-      - CHAINLIT_PORT=8000
-      - PYTHONUNBUFFERED=1
-      - CHAINLIT_AUTH_SECRET=${CHAINLIT_AUTH_SECRET:-your_secret_key_here}
-      - PYTHONIOENCODING=utf-8
-    restart: unless-stopped 
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s 

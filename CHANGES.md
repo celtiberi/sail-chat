@@ -63,8 +63,15 @@ Created `docker-compose.gpu.yml` with:
 
 ### 3. Dockerfile Updates
 
-Updated `Dockerfile.gpu` with:
-- CUDA-specific environment variables
+Updated `Dockerfile` for CPU environments with:
+- Optimizations for Apple Silicon and other CPU-only environments
+- Memory-efficient settings
+- Explicit CPU-only PyTorch installation
+
+Created `Dockerfile.gpu` for GPU environments with:
+- CUDA-specific base image (nvidia/cuda:12.1.1-cudnn8-runtime-ubuntu22.04)
+- GPU-specific environment variables
+- PyTorch with CUDA support
 - Performance optimizations for GPU usage
 - Proper NVIDIA runtime configuration
 
@@ -91,6 +98,7 @@ Created `restart_containers.sh` to:
 Updated documentation files:
 - `README.md`: Added Docker deployment instructions for both environments
 - `SETUP.md`: Created a platform-adaptive setup guide
+- `GPU_SETUP.md`: Created a detailed guide for GPU environment setup
 - This `CHANGES.md` file to document all modifications
 
 ## Memory Optimization
@@ -103,9 +111,9 @@ Updated documentation files:
 
 ### 2. GPU Optimizations
 
-- Set appropriate CUDA environment variables
-- Configured memory allocation settings
-- Optimized for NVIDIA GPU performance
+- Set appropriate CUDA environment variables (CUDA_VISIBLE_DEVICES, PYTORCH_CUDA_ALLOC_CONF)
+- Configured memory allocation settings for optimal performance
+- Optimized for NVIDIA GPU performance with proper CUDA runtime
 
 ## Testing and Validation
 
@@ -118,4 +126,5 @@ The application has been tested on:
 
 - Further memory optimizations for large models
 - Additional platform-specific optimizations
-- Performance monitoring and logging enhancements 
+- Performance monitoring and logging enhancements
+- Support for multi-GPU environments 

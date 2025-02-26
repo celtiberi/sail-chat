@@ -1,7 +1,7 @@
 from pydantic import BaseModel, Field
 from typing_extensions import Literal, get_args
 from langchain_core.documents import Document
-from typing import List, Dict
+from typing import List, Dict, Optional, Any
 
 # Define forum topics as a type
 ForumTopic = Literal[
@@ -56,3 +56,7 @@ class State(BaseModel):
     context: List[Document] | None = Field(default_factory=list)
     visual_context: List[Document] = Field(default_factory=list)  # Visual search results
     visual_files: List[str] = Field(default_factory=list)  # Paths to visual results
+    current_step: Any = None  # Chainlit step for streaming responses
+    current_message: Any = None  # Chainlit message for streaming responses
+    steps: Dict[str, Any] = Field(default_factory=dict)  # Dictionary of steps for each node
+    updated_steps: Dict[str, bool] = Field(default_factory=dict)  # Track which steps have been updated

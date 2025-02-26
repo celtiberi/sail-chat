@@ -118,8 +118,6 @@ class RetrieverConfig:
 @dataclass
 class VisualSearchConfig:
     """Configuration for visual search functionality"""
-    DPI: int = 300
-    CHUNK_SIZE: int = 10
     MODEL_NAME: str = "vidore/colqwen2-v1.0"
     # Device selection is handled by the platform-specific implementation
     # This is just a default that may be overridden

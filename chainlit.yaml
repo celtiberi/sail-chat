@@ -1,0 +1,31 @@
+# Chainlit configuration file
+# See https://docs.chainlit.io/reference/config for more details
+
+# UI customization
+ui:
+  name: "Sailing Assistant"
+  description: "Ask questions about sailing and boating"
+  hide_cot: false # Show chain of thought by default
+  # Set custom theme colors
+  theme:
+    light:
+      primary: "#0a6e81" # Nautical blue
+    dark:
+      primary: "#0a6e81" # Nautical blue
+
+# Features
+features:
+  # Enable streaming for better user experience
+  streaming: true
+  # Enable multi-modal inputs
+  multi_modal: true
+
+# Code execution settings
+code:
+  # Enable code execution
+  enabled: false
+
+# Deployment settings
+project:
+  # Enable public sharing
+  public: false 

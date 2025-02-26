@@ -10,17 +10,16 @@ from langchain_core.documents import Document
 import numpy as np
 from langchain_core.retrievers import BaseRetriever
 from pydantic import Field
-from retriever import Retriever
-from models import State
+from src.retriever import Retriever
+from src.models import State
 from langgraph.graph import START, StateGraph
-from visual_index.search import VisualSearch
+from src.visual_index.search import VisualSearch
 from langchain_chroma import Chroma
 from langchain_huggingface import HuggingFaceEmbeddings
 import atexit
 import platform
-
-from dataclasses import asdict
-from session_manager import SessionManager
+from src.session_manager import SessionManager
+from src.visual_index.index_provider import IndexProvider
 
 # Check if running on Apple Silicon and configure PyTorch appropriately
 is_apple_silicon = platform.system() == 'Darwin' and platform.machine() == 'arm64'
@@ -37,7 +36,7 @@ if is_apple_silicon:
         print("PyTorch not available")
 
 # Import centralized configuration
-from config import (
+from src.config import (
     APP_CONFIG as CONFIG,
     RETRIEVER_CONFIG,
     VISUAL_CONFIG,
@@ -78,11 +77,16 @@ try:
     logger.info(f"Visual model name: {VISUAL_CONFIG.MODEL_NAME}")
     logger.info(f"Visual device: {VISUAL_CONFIG.DEVICE}")
     
-    start_time = perf_counter()
-    VisualSearch.initialize_shared_index()
-    end_time = perf_counter()
+    # Check if the index is already loaded (for hot reloading scenarios)
+    if IndexProvider._index_instance is None:
+        logger.info("Index not found in memory, initializing...")
+        start_time = perf_counter()
+        VisualSearch.initialize_shared_index()
+        end_time = perf_counter()
+        logger.info(f"VisualSearch shared index initialized successfully in {end_time - start_time:.2f} seconds")
+    else:
+        logger.info("VisualSearch shared index already loaded, skipping initialization")
     
-    logger.info(f"VisualSearch shared index initialized successfully in {end_time - start_time:.2f} seconds")
     logger.info(f"Memory usage after VisualSearch initialization: {os.popen('ps -o rss -p %d | tail -n1' % os.getpid()).read().strip()} KB")
     
     # Initialize ChromaDB - this is the only place ChromaDB is initialized in the application
@@ -118,34 +122,21 @@ def cosine_similarity(vec1: np.ndarray, vec2: np.ndarray) -> float:
         return 0.0
     return np.dot(vec1, vec2) / (norm1 * norm2)
 
-def should_continue(state: State) -> Literal["retrieve", "reject"]:
-    """Determine next node based on validation result."""
-    return "retrieve" if state.is_sailing_related else "reject"
-
 def create_chain(retriever: Retriever):
     """Create a LangGraph chain with validation."""
     # Create StateGraph with sequential execution
     graph_builder = StateGraph(State)
     
     # Add nodes
-    graph_builder.add_node("validate", retriever.validate_query)
     graph_builder.add_node("analyze", retriever.analyze_query)
     graph_builder.add_node("retrieve", retriever.retrieve)
     graph_builder.add_node("generate", retriever.generate)
     graph_builder.add_node("reject", retriever.reject_query)
     
     # Add edges with a clear sequential flow
-    graph_builder.add_edge(START, "validate")
+    graph_builder.add_edge(START, "analyze")
     
-    # Define conditional paths after validation
-    graph_builder.add_conditional_edges(
-        "validate",
-        should_continue,
-        {
-            "retrieve": "analyze",  # If should_continue returns "retrieve", go to analyze
-            "reject": "reject"      # If should_continue returns "reject", go to reject
-        }
-    )
+    
     
     # Continue the sequential flow
     graph_builder.add_edge("analyze", "retrieve")
@@ -166,14 +157,15 @@ async def init():
         session = SessionManager(State)
         cl.user_session.set("session", session)
 
-        # Initialize LLM
+        # Initialize LLM with streaming enabled
         llm = ChatGoogleGenerativeAI(
             model=CONFIG.llm.model_name,
             temperature=CONFIG.llm.temperature,
             max_output_tokens=CONFIG.llm.max_tokens,
             top_p=CONFIG.llm.top_p,
+            streaming=True,  # Enable streaming
         )
-        logger.info("LLM initialized")
+        logger.info("LLM initialized with streaming enabled")
         
         # Create a new VisualSearch instance for this user session
         # This uses the shared index but has its own instance for thread safety
@@ -234,20 +226,65 @@ def format_docs_as_sources(docs: List[Document]) -> List[cl.Text]:
         for idx, doc in enumerate(docs, 1)
     ]
 
+async def create_detailed_step(name: str, description: str = None, show_input: bool = True) -> cl.Step:
+    """Create a detailed step with proper configuration for visualization.
+    
+    Args:
+        name: Name of the step
+        description: Optional description of what the step does
+        show_input: Whether to show the input in the UI
+        
+    Returns:
+        A configured Chainlit Step
+    """
+    # Create step with proper type for visualization
+    step = cl.Step(
+        name=name,
+        type="tool" if show_input else "run",
+        show_input=show_input
+    )
+    
+    # Add description if provided
+    if description:
+        step.output = description
+    
+    # Send the step to display it in the UI
+    await step.send()
+    
+    return step
+
 @cl.on_message
 async def main(message: cl.Message):
     try:
         session = cl.user_session.get("session")
         chain = cl.user_session.get("chain")
-
-        
-        # Create response message
-        msg = cl.Message(content="", author="Assistant")
-        await msg.send()
         
         # Create state for this retrieval process
         session.model.question = message.content
+        
+        # Initialize empty dictionaries for steps and tracking
+        steps = {}
+        updated_steps = {"analyze": False, "retrieve": False, "generate": False, "reject": False}
+        
+        # Store the tracking dictionary in the session
+        session.model.updated_steps = updated_steps
+        
+        # Store the steps dictionary in the session for the nodes to access
+        session.model.steps = steps
+        
+        # Log that we're about to run the chain with streaming
+        logger.info("Running chain with streaming enabled")
+        
+        # Create a message object for streaming that we'll use internally
+        temp_msg = cl.Message(content="", author="Assistant")
+        await temp_msg.send()  # Send the empty message so we can stream to it
+        session.model.current_message = temp_msg  # Store for streaming in the generate step
+        
+        # Run the chain
         result = await chain.ainvoke(session.model.model_dump())
+        
+        # No need to create a new message since we've already streamed to temp_msg
+        logger.info("Response streaming completed")
         
         # Batch updates
         with session.batch_update() as state:
@@ -255,14 +292,18 @@ async def main(message: cl.Message):
             state.chat_history = result["chat_history"]
             state.chat_history.append({"role": "human", "content": message.content})
             state.chat_history.append({"role": "assistant", "content": result["answer"]})
+            # Clear the message reference after use
+            state.current_message = None
+            # Clear the steps dictionary after use
+            state.steps = {}
+            # Clear the updated_steps dictionary after use
+            state.updated_steps = {}
         
-        # Update response
-        msg.content = result["answer"]
+        # Add sources if needed
         settings = cl.user_session.get("settings", UserSettings())
         if settings.show_sources and result.get("current_context"):
-            msg.elements = format_docs_as_sources(result["current_context"])
-        await msg.update()
-        
+            temp_msg.elements = format_docs_as_sources(result["current_context"])
+            await temp_msg.update()
         
     except Exception as e:
         logger.error("Error in message processing", exc_info=True)
@@ -333,7 +374,7 @@ async def handle_error(error: Exception, context: str):
     
     user_msg = "An error occurred while processing your request."
     settings = cl.user_session.get("settings", UserSettings())
-    if settings.debug_mode:
+    if settings and settings.debug_mode:
         user_msg = f"{user_msg}\n\nDebug info: {str(error)}"
     
     await cl.Message(
@@ -342,25 +383,18 @@ async def handle_error(error: Exception, context: str):
         type="error"
     ).send()
 
-# Add this at the end of the file
-if __name__ == "__main__":
-    from chainlit.cli import run_chainlit
-    
-    # Register shutdown handler to clean up resources
-    def cleanup_resources():
-        """Clean up shared resources when the application exits."""
-        logger.info("Cleaning up shared resources...")
+# Register cleanup function to ensure resources are released on application exit
+def cleanup_resources():
+    try:
+        logger.info("Application shutting down, cleaning up resources...")
         
-        # Clean up VisualSearch shared index
-        try:
-            logger.info("Closing VisualSearch shared index...")
-            VisualSearch.close_shared_index()
-            logger.info("VisualSearch shared index closed successfully")
-        except Exception as e:
-            logger.error(f"Error closing VisualSearch shared index: {str(e)}")
+        # Close the shared index
+        from visual_index.search import VisualSearch
+        logger.info("Closing shared VisualSearch index")
+        VisualSearch.close_shared_index()
         
         # Clean up ChromaDB
-        if SHARED_CHROMA:
+        if 'SHARED_CHROMA' in globals():
             try:
                 logger.info("Closing ChromaDB...")
                 # ChromaDB handles cleanup internally when Python exits
@@ -368,9 +402,17 @@ if __name__ == "__main__":
                 logger.info("ChromaDB will be closed during Python shutdown")
             except Exception as e:
                 logger.error(f"Error with ChromaDB cleanup: {str(e)}")
-    
-    # Register the cleanup function to run on exit
-    atexit.register(cleanup_resources)
+        
+        logger.info("All resources cleaned up successfully")
+    except Exception as e:
+        logger.error(f"Error during application cleanup: {str(e)}", exc_info=True)
+
+# Register the cleanup function to run when the application exits
+atexit.register(cleanup_resources)
+
+# Add this at the end of the file
+if __name__ == "__main__":
+    from chainlit.cli import run_chainlit
     
     # Run the Chainlit application
     run_chainlit(__file__)

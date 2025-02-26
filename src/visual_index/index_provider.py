@@ -13,6 +13,8 @@ import platform
 import threading
 from pathlib import Path
 from typing import Dict, Optional, Any
+import pickle
+import tempfile
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -33,6 +35,12 @@ else:
 # Import centralized configuration
 from src.config import VISUAL_CONFIG as Config
 
+# Create a persistent cache file path in the system temp directory
+# This file will survive hot reloads but will be cleaned up when the system restarts
+CACHE_DIR = Path(tempfile.gettempdir()) / "byaldi_cache"
+CACHE_DIR.mkdir(exist_ok=True)
+CACHE_FILE = CACHE_DIR / "index_instance_id.pkl"
+
 class IndexProvider:
     """
     Provides access to the Byaldi index, abstracting away platform-specific details.
@@ -42,6 +50,7 @@ class IndexProvider:
     # Class-level variables for shared resources
     _index_instance = None
     _index_lock = threading.RLock()  # Lock for initializing the index
+    _index_id = None  # ID to check if we need to reload the index
     
     @classmethod
     def get_index(cls, index_name: str = "visual_books") -> RAGMultiModalModel:
@@ -55,8 +64,50 @@ class IndexProvider:
             The initialized RAGMultiModalModel instance
         """
         with cls._index_lock:
+            # Check if we have a cached index ID
+            if cls._index_id is None:
+                # Try to load the index ID from the cache file
+                if CACHE_FILE.exists():
+                    try:
+                        with open(CACHE_FILE, 'rb') as f:
+                            cls._index_id = pickle.load(f)
+                            logger.info(f"Loaded index ID from cache: {cls._index_id}")
+                    except Exception as e:
+                        logger.warning(f"Failed to load index ID from cache: {e}")
+                        cls._index_id = None
+            
+            # If we have a valid index ID but no instance, try to get it from the global namespace
+            if cls._index_id is not None and cls._index_instance is None:
+                try:
+                    # Try to get the index from the global namespace using the ID
+                    import builtins
+                    if hasattr(builtins, f"_byaldi_index_{cls._index_id}"):
+                        cls._index_instance = getattr(builtins, f"_byaldi_index_{cls._index_id}")
+                        logger.info(f"Retrieved index instance from global namespace with ID: {cls._index_id}")
+                except Exception as e:
+                    logger.warning(f"Failed to retrieve index from global namespace: {e}")
+                    cls._index_id = None
+                    cls._index_instance = None
+            
+            # If we still don't have an index instance, initialize it
             if cls._index_instance is None:
                 cls._initialize_index(index_name)
+                
+                # Store the index in the global namespace with a unique ID
+                import uuid
+                import builtins
+                cls._index_id = str(uuid.uuid4())
+                setattr(builtins, f"_byaldi_index_{cls._index_id}", cls._index_instance)
+                logger.info(f"Stored index instance in global namespace with ID: {cls._index_id}")
+                
+                # Save the index ID to the cache file
+                try:
+                    with open(CACHE_FILE, 'wb') as f:
+                        pickle.dump(cls._index_id, f)
+                        logger.info(f"Saved index ID to cache: {cls._index_id}")
+                except Exception as e:
+                    logger.warning(f"Failed to save index ID to cache: {e}")
+            
             return cls._index_instance
     
     @classmethod
@@ -119,8 +170,29 @@ class IndexProvider:
         with cls._index_lock:
             if cls._index_instance is not None:
                 logger.info("Closing shared RAGMultiModalModel")
+                
+                # Remove from global namespace if it exists there
+                if cls._index_id is not None:
+                    try:
+                        import builtins
+                        if hasattr(builtins, f"_byaldi_index_{cls._index_id}"):
+                            delattr(builtins, f"_byaldi_index_{cls._index_id}")
+                            logger.info(f"Removed index instance from global namespace with ID: {cls._index_id}")
+                    except Exception as e:
+                        logger.warning(f"Failed to remove index from global namespace: {e}")
+                
+                # Delete the instance and clear the cache file
                 del cls._index_instance
                 cls._index_instance = None
+                cls._index_id = None
+                
+                if CACHE_FILE.exists():
+                    try:
+                        CACHE_FILE.unlink()
+                        logger.info("Removed index ID cache file")
+                    except Exception as e:
+                        logger.warning(f"Failed to remove cache file: {e}")
+                
                 gc.collect()
                 logger.info("Shared RAGMultiModalModel closed successfully")
     

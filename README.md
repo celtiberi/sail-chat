@@ -11,6 +11,7 @@ A sophisticated AI-powered chatbot designed to help new sailors understand the w
 - **Markdown Formatting**: Delivers well-structured, easy-to-read responses
 - **Conversation Memory**: Maintains context throughout the conversation
 - **Forum Topic Classification**: Automatically categorizes queries by relevant sailing topics
+- **Platform Adaptability**: Optimized for both Apple Silicon and GPU environments
 
 ## Architecture
 
@@ -20,6 +21,9 @@ The system is built on a modern RAG architecture with these key components:
 - **Visual Index**: Processes and indexes images for visual search capabilities
 - **LangChain Integration**: Leverages LangChain for prompt templates and LLM interactions
 - **Multimodal LLM**: Uses advanced language models capable of processing both text and images
+- **Platform Abstraction**: Automatically adapts to different hardware environments
+
+For more details on the architecture, see [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## Installation
 
@@ -87,10 +91,18 @@ The system is highly configurable through the `RetrieverConfig` class:
 │   ├── models.py             # Data models and state management
 │   ├── session_manager.py    # User session handling
 │   └── visual_index/         # Image processing and visual search
-│       └── search.py         # Visual search implementation
+│       ├── search.py         # Visual search implementation
+│       └── index_provider.py # Platform-adaptive index management
 ├── custom_modules/           # Custom extensions
 │   └── byaldi/               # Custom multimodal RAG implementation
 ├── .env                      # Environment variables
+├── Dockerfile                # CPU-optimized Docker configuration
+├── Dockerfile.gpu            # GPU-optimized Docker configuration
+├── docker-compose.yml        # Docker Compose for CPU environments
+├── docker-compose.gpu.yml    # Docker Compose for GPU environments
+├── ARCHITECTURE.md           # Detailed architecture documentation
+├── CHANGES.md                # Summary of platform adaptability changes
+├── GPU_SETUP.md              # GPU-specific setup instructions
 └── README.md                 # This file
 ```
 
@@ -103,14 +115,6 @@ To extend the assistant's capabilities:
 3. Improve the visual search capabilities
 4. Customize the system prompt for different use cases
 
-## License
-
-[Specify your license here]
-
-## Contributing
-
-[Guidelines for contributing to the project]
-
 ## Docker Deployment
 
 This application can be run in a Docker container for easier deployment and consistency across environments. We provide two different Docker configurations:
@@ -122,7 +126,7 @@ This application can be run in a Docker container for easier deployment and cons
 
 - Docker and Docker Compose installed on your system
 - Google API key for the language model
-- For GPU mode: NVIDIA GPU with CUDA support and nvidia-docker installed
+- For GPU mode: NVIDIA GPU with CUDA support and NVIDIA Container Toolkit installed
 
 ### Running on Apple Silicon (or CPU-only systems)
 
@@ -136,7 +140,7 @@ This will:
 - Mount the data directories as volumes
 - Start the application on port 8000
 
-### Running on GPU Systems (RunPod or other NVIDIA GPU environments)
+### Running on GPU Systems
 
 ```bash
 # Build and start the container in GPU mode
@@ -148,6 +152,8 @@ This will:
 - Configure the container to use NVIDIA GPUs
 - Mount the data directories as volumes
 - Start the application on port 8000
+
+For detailed GPU setup instructions, see [GPU_SETUP.md](GPU_SETUP.md).
 
 ### Accessing the Application
 
@@ -173,17 +179,36 @@ The Docker setup uses volume mounts to persist data:
 
 This ensures that your data remains intact even if the container is removed.
 
-## RunPod Deployment
+## Platform-Specific Optimizations
 
-For deploying on RunPod, follow these steps:
+### Apple Silicon / CPU-only Environments
 
-1. Create a new pod with an NVIDIA GPU
-2. Clone this repository on the pod
-3. Run the application using the GPU configuration:
+The application includes specific optimizations for Apple Silicon:
+- Uses memory-mapped tensors for efficient memory usage
+- Forces CPU usage to avoid CUDA initialization errors
+- Applies custom patches to optimize for Apple Silicon
+
+### GPU Environments
+
+For systems with NVIDIA GPUs, the application:
+- Uses CUDA acceleration for faster processing
+- Configures memory allocation settings for optimal performance
+- Leverages GPU memory for model inference
+
+## Checking Your Environment
+
+Run the environment checker script to determine the best configuration for your system:
 
 ```bash
-cd /path/to/repo
-docker-compose -f docker-compose.gpu.yml up -d
+python check_environment.py
 ```
 
-4. Access the application through the RunPod port forwarding feature 
+This will analyze your system and recommend the appropriate Docker configuration.
+
+## License
+
+[Specify your license here]
+
+## Contributing
+
+[Guidelines for contributing to the project] 
