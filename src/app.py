@@ -17,9 +17,24 @@ from visual_index.search import VisualSearch
 from langchain_chroma import Chroma
 from langchain_huggingface import HuggingFaceEmbeddings
 import atexit
+import platform
 
 from dataclasses import asdict
 from session_manager import SessionManager
+
+# Check if running on Apple Silicon and configure PyTorch appropriately
+is_apple_silicon = platform.system() == 'Darwin' and platform.machine() == 'arm64'
+if is_apple_silicon:
+    try:
+        import torch
+        print(f"Running on Apple Silicon: {is_apple_silicon}")
+        print(f"PyTorch version: {torch.__version__}")
+        print(f"PyTorch has MPS: {hasattr(torch, 'mps') and hasattr(torch.mps, 'is_available')}")
+        if hasattr(torch, 'mps') and hasattr(torch.mps, 'is_available'):
+            print(f"MPS is available: {torch.mps.is_available()}")
+            print("Note: Using CPU device for compatibility with memory-mapped tensor loading")
+    except ImportError:
+        print("PyTorch not available")
 
 # Import centralized configuration
 from config import (
@@ -32,15 +47,25 @@ from config import (
 
 # Configure logging
 LOG_SEPARATOR = "=" * 50
+log_level = os.getenv("LOG_LEVEL", "INFO")
+print(f"Setting up logging with level: {log_level}")
 logging.basicConfig(
-    level=os.getenv("LOG_LEVEL", "INFO"),
+    level=log_level,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     handlers=[
         logging.StreamHandler(),
         logging.FileHandler("forum_chat.log")
-    ]
+    ],
+    force=True  # Override any existing logging configuration
 )
+# Set the root logger level as well
+logging.getLogger().setLevel(log_level)
 logger = logging.getLogger(__name__)
+logger.setLevel(log_level)
+
+# Print a test message to verify logging is working
+logger.debug("DEBUG logging is enabled")
+logger.info("INFO logging is enabled")
 
 # Initialize shared resources at application startup
 # This ensures we only load resource-intensive components once
@@ -48,20 +73,38 @@ try:
     logger.info("Initializing shared resources")
     
     # Initialize VisualSearch shared index
-    logger.info("Initializing shared VisualSearch index")
+    logger.info("Initializing shared VisualSearch index - START")
+    logger.info(f"Visual index path: {VISUAL_CONFIG.INDEX_ROOT}")
+    logger.info(f"Visual model name: {VISUAL_CONFIG.MODEL_NAME}")
+    logger.info(f"Visual device: {VISUAL_CONFIG.DEVICE}")
+    
+    start_time = perf_counter()
     VisualSearch.initialize_shared_index()
-    logger.info("VisualSearch shared index initialized successfully")
+    end_time = perf_counter()
+    
+    logger.info(f"VisualSearch shared index initialized successfully in {end_time - start_time:.2f} seconds")
+    logger.info(f"Memory usage after VisualSearch initialization: {os.popen('ps -o rss -p %d | tail -n1' % os.getpid()).read().strip()} KB")
     
     # Initialize ChromaDB - this is the only place ChromaDB is initialized in the application
-    logger.info("Initializing shared ChromaDB instance")
+    logger.info("Initializing shared ChromaDB instance - START")
+    logger.info(f"ChromaDB path: {RETRIEVER_CONFIG.get_db_path()}")
+    logger.info(f"ChromaDB collection: {RETRIEVER_CONFIG.forum_collection}")
+    
+    start_time = perf_counter()
     chroma_path = RETRIEVER_CONFIG.get_db_path()
     embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+    logger.info("Embeddings model loaded")
+    
     SHARED_CHROMA = Chroma(
         persist_directory=chroma_path,
         collection_name=RETRIEVER_CONFIG.forum_collection,
         embedding_function=embeddings
     )
-    logger.info(f"ChromaDB initialized successfully at {chroma_path}")
+    end_time = perf_counter()
+    
+    logger.info(f"ChromaDB initialized successfully at {chroma_path} in {end_time - start_time:.2f} seconds")
+    logger.info(f"Memory usage after ChromaDB initialization: {os.popen('ps -o rss -p %d | tail -n1' % os.getpid()).read().strip()} KB")
+    logger.info("All shared resources initialized successfully")
     
 except Exception as e:
     logger.error(f"Error initializing shared resources: {str(e)}", exc_info=True)

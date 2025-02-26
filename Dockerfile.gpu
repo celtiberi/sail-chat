@@ -1,0 +1,58 @@
+FROM nvidia/cuda:12.1.1-cudnn8-runtime-ubuntu22.04
+
+# Set working directory
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    python3 \
+    python3-pip \
+    python3-dev \
+    poppler-utils \
+    libgl1-mesa-glx \
+    libglib2.0-0 \
+    build-essential \
+    gcc \
+    g++ \
+    git \
+    wget \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy requirements file
+COPY requirements.txt ./
+
+# Install Python dependencies
+RUN pip3 install --no-cache-dir -r requirements.txt
+
+# Install PyTorch with CUDA support
+RUN pip3 install --no-cache-dir torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+
+# Install custom modules
+COPY custom_modules/ ./custom_modules/
+# Install our custom extension
+RUN cd custom_modules/byaldi && pip3 install -e .
+
+# Copy application code
+COPY src/ ./src/
+COPY .chainlit/ ./.chainlit/
+COPY chainlit.md ./
+
+# Create directories for mounted volumes
+RUN mkdir -p data/pdfs .byaldi chroma_db
+
+# Expose the port Chainlit runs on
+EXPOSE 8000
+
+# Set environment variables
+ENV PYTHONPATH=/app
+ENV CHAINLIT_HOST=0.0.0.0
+ENV CHAINLIT_PORT=8000
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONIOENCODING=utf-8
+ENV VISUAL_DEVICE=cuda
+# Optimize CUDA performance
+ENV CUDA_VISIBLE_DEVICES=0
+ENV PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:128
+
+# Start the application
+CMD ["chainlit", "run", "src/app.py", "--port", "8000", "--host", "0.0.0.0"] 

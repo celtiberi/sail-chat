@@ -4,16 +4,43 @@ from pathlib import Path
 from typing import Union, Optional, List
 import srsly
 import logging
+import platform
+import gc
 
 from byaldi.colpali import ColPaliModel
 
 # Set up logging
 logger = logging.getLogger(__name__)
 
-# We're using CPU-only for Apple Silicon compatibility
-# CUDA is not available on Apple Silicon, and MPS (Metal Performance Shaders)
-# has compatibility issues with some PyTorch operations.
-# Memory-mapped tensors also work best on CPU.
+# Monkey patch torch.cuda to prevent CUDA initialization errors
+# This is needed because the base library tries to use CUDA even when we specify CPU
+original_lazy_init = torch.cuda._lazy_init
+
+def safe_lazy_init():
+    """Replacement for torch.cuda._lazy_init that doesn't raise an error"""
+    logger.info("Prevented CUDA initialization - using CPU instead")
+    return False
+
+# Replace the function
+torch.cuda._lazy_init = safe_lazy_init
+
+# Also patch torch.cuda.is_available to always return False
+original_is_available = torch.cuda.is_available
+
+def safe_is_available():
+    """Always return False for CUDA availability"""
+    return False
+
+# Apply the patch
+torch.cuda.is_available = safe_is_available
+
+# Set environment variables to ensure CPU usage
+os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
+
+# Set PyTorch memory optimization settings
+torch.set_num_threads(4)  # Limit number of threads
+os.environ["OMP_NUM_THREADS"] = "4"  # OpenMP threads
+os.environ["MKL_NUM_THREADS"] = "4"  # MKL threads
 
 class CustomColPaliModel(ColPaliModel):
     """Custom version of ColPaliModel that uses mmap=True for torch.load and always uses CPU for memory efficiency"""
@@ -28,26 +55,54 @@ class CustomColPaliModel(ColPaliModel):
     ):
         """Override from_index to use mmap=True for torch.load and always use CPU"""
         
+        # Force CPU device for all platforms
+        logger.info("Forcing CPU device for model loading")
+        kwargs['device'] = 'cpu'
+        n_gpu = 0
+        
+        # Run garbage collection before loading model
+        gc.collect()
         
         index_path = Path(index_root) / Path(index_path)
         index_config = srsly.read_gzip_json(index_path / "index_config.json.gz")
 
         # Create instance with CPU device to ensure memory efficiency with mmap
-        instance = cls(
-            pretrained_model_name_or_path=index_config["model_name"],
-            n_gpu=n_gpu,
-            index_name=index_path.name,
-            verbose=verbose,
-            load_from_index=False,  # We'll load manually with mmap
-            index_root=str(index_path.parent),
-            device='cpu',  # Always use CPU regardless of requested device
-            **kwargs,
-        )
-        
-        # Now manually load the index with mmap=True
-        instance._load_index_with_mmap(index_path)
-        
-        return instance
+        try:
+            logger.info(f"Creating model instance with CPU device and memory mapping")
+            
+            # Remove device from kwargs if it exists to avoid duplicate
+            if 'device' in kwargs:
+                del kwargs['device']
+                
+            instance = cls(
+                pretrained_model_name_or_path=index_config["model_name"],
+                n_gpu=n_gpu,
+                index_name=index_path.name,
+                verbose=verbose,
+                load_from_index=False,  # We'll load manually with mmap
+                index_root=str(index_path.parent),
+                device='cpu',  # Always use CPU regardless of requested device
+                **kwargs,
+            )
+            
+            # Now manually load the index with mmap=True
+            logger.info(f"Loading index with memory mapping enabled")
+            instance._load_index_with_mmap(index_path)
+            
+            # Run garbage collection after loading
+            gc.collect()
+            
+            return instance
+        except AssertionError as e:
+            if "Torch not compiled with CUDA enabled" in str(e):
+                logger.warning("Caught CUDA error during model loading - this should not happen with our patches")
+                # Try again with even more explicit CPU settings
+                raise RuntimeError("Failed to load model even with CPU settings. Please check PyTorch installation.")
+            else:
+                raise
+        except Exception as e:
+            logger.error(f"Error loading model: {str(e)}")
+            raise
     
     def _load_index_with_mmap(self, index_path: Path):
         """Load the index using mmap=True for torch.load, always on CPU
@@ -60,39 +115,30 @@ class CustomColPaliModel(ColPaliModel):
         - This approach is memory-efficient as it only loads data when needed
         - Always using CPU ensures compatibility with memory mapping
         """
-        # Load index config
-        index_config = srsly.read_gzip_json(index_path / "index_config.json.gz")
-        self.full_document_collection = index_config.get(
-            "full_document_collection", False
-        )
-        self.resize_stored_images = index_config.get("resize_stored_images", False)
-        self.max_image_width = index_config.get("max_image_width", None)
-        self.max_image_height = index_config.get("max_image_height", None)
-
-        if self.full_document_collection:
-            collection_path = index_path / "collection"
-            json_files = sorted(
-                collection_path.glob("*.json.gz"),
-                key=lambda x: int(x.stem.split(".")[0]),
-            )
-
-            for json_file in json_files:
-                loaded_data = srsly.read_gzip_json(json_file)
-                self.collection.update({int(k): v for k, v in loaded_data.items()})
-
-            if self.verbose > 0:
-                print(
-                    "You are using in-memory collection. This means every image is stored in memory."
-                )
-                print(
-                    "You might want to rethink this if you have a large collection!"
-                )
-                print(
-                    f"Loaded {len(self.collection)} images from {len(json_files)} JSON files."
-                )
-
-        # Load embeddings with mmap=True
+        # Load metadata
+        metadata_path = index_path / "metadata.json.gz"
+        if metadata_path.exists():
+            self.doc_id_to_metadata = srsly.read_gzip_json(metadata_path)
+            # Convert metadata keys to integers
+            self.doc_id_to_metadata = {
+                int(k): v for k, v in self.doc_id_to_metadata.items()
+            }
+            
+        # Load doc_ids_to_file_names
+        doc_ids_to_file_names_path = index_path / "doc_ids_to_file_names.json.gz"
+        if doc_ids_to_file_names_path.exists():
+            self.doc_ids_to_file_names = srsly.read_gzip_json(doc_ids_to_file_names_path)
+            self.doc_ids_to_file_names = {
+                int(k): v for k, v in self.doc_ids_to_file_names.items()
+            }
+        else:
+            self.doc_ids_to_file_names = {}
+            
+        # Load embeddings
         embeddings_path = index_path / "embeddings"
+        if not embeddings_path.exists():
+            raise FileNotFoundError(f"Embeddings directory not found at {embeddings_path}")
+            
         embedding_files = sorted(
             embeddings_path.glob("embeddings_*.pt"),
             key=lambda x: int(x.stem.split("_")[1]),
@@ -101,11 +147,11 @@ class CustomColPaliModel(ColPaliModel):
         # Print debug info about embedding files
         if self.verbose > 0:
             total_size_mb = sum(f.stat().st_size for f in embedding_files) / (1024 * 1024)
-            print(f"Loading {len(embedding_files)} embedding files, total size: {total_size_mb:.2f} MB")
-            print(f"Using device: cpu (for memory-mapped tensors)")
-            print(f"Memory-mapped loading enabled (mmap=True)")
-            print(f"Note: Activity Monitor will show ~{total_size_mb:.2f} MB higher memory usage")
-            print(f"      This is normal for memory-mapped files and doesn't affect actual RAM usage")
+            logger.info(f"Loading {len(embedding_files)} embedding files, total size: {total_size_mb:.2f} MB")
+            logger.info(f"Using device: cpu (for memory-mapped tensors)")
+            logger.info(f"Memory-mapped loading enabled (mmap=True)")
+            logger.info(f"Note: Activity Monitor will show ~{total_size_mb:.2f} MB higher memory usage")
+            logger.info(f"      This is normal for memory-mapped files and doesn't affect actual RAM usage")
         
         # Store loaded tensors in a list without using extend to avoid potential copies
         self.indexed_embeddings = []
@@ -119,23 +165,24 @@ class CustomColPaliModel(ColPaliModel):
                 # Print debug info about the loaded tensor
                 if self.verbose > 0 and isinstance(loaded_tensor, torch.Tensor):
                     tensor_size_mb = loaded_tensor.element_size() * loaded_tensor.numel() / (1024 * 1024)
-                    print(f"  Loaded tensor from {file.name}: shape={loaded_tensor.shape}, "
+                    logger.info(f"  Loaded tensor from {file.name}: shape={loaded_tensor.shape}, "
                           f"size={tensor_size_mb:.2f} MB")
                     
                     # For very large tensors, consider chunking them to avoid memory issues
                     if tensor_size_mb > 1000:  # If tensor is larger than 1GB
-                        print(f"  Large tensor detected ({tensor_size_mb:.2f} MB). "
+                        logger.info(f"  Large tensor detected ({tensor_size_mb:.2f} MB). "
                               f"Will use chunked access for memory efficiency.")
                 
                 # Store each file's tensors as a separate item in the list
                 self.indexed_embeddings.append(loaded_tensor)
                 
             except Exception as e:
-                print(f"Error loading tensor from {file}: {e}")
+                logger.error(f"Error loading tensor from {file}: {e}")
+                raise
         
         # We no longer move tensors to other devices - always keep on CPU for memory mapping
         if self.verbose > 0:
-            print("All tensors kept on CPU for memory-mapped access")
+            logger.info("All tensors kept on CPU for memory-mapped access")
             
         # Flatten the list if needed for compatibility with the rest of the code
         # This approach avoids creating copies of the memory-mapped tensors
@@ -159,25 +206,6 @@ class CustomColPaliModel(ColPaliModel):
         self.doc_ids = set(
             int(entry["doc_id"]) for entry in self.embed_id_to_doc_id.values()
         )
-        try:
-            # We don't want this error out with indexes created prior to 0.0.2
-            self.doc_ids_to_file_names = srsly.read_gzip_json(
-                index_path / "doc_ids_to_file_names.json.gz"
-            )
-            self.doc_ids_to_file_names = {
-                int(k): v for k, v in self.doc_ids_to_file_names.items()
-            }
-        except FileNotFoundError:
-            pass
-
-        # Load metadata
-        metadata_path = index_path / "metadata.json.gz"
-        if metadata_path.exists():
-            self.doc_id_to_metadata = srsly.read_gzip_json(metadata_path)
-            # Convert metadata keys to integers
-            self.doc_id_to_metadata = {
-                int(k): v for k, v in self.doc_id_to_metadata.items()
-            } 
 
     # def search(
     #     self,

@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """
 Visual search implementation:
-  - Uses CPU for compatibility with Apple Silicon
-  - Memory-mapped tensor loading for efficiency
-  - Batch PDF-to-image conversion
+  - Uses the IndexProvider to abstract platform-specific details
+  - Provides a clean interface for searching visual content
 """
 
 import os
@@ -22,14 +21,14 @@ from rich.progress import track, Progress, SpinnerColumn, TimeElapsedColumn
 from PIL import Image
 from pydantic import BaseModel
 
-# Import our custom RAGMultiModalModel instead of the original
-import sys
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))  # Add project root to path
-from custom_modules.byaldi import RAGMultiModalModel
+# Import the IndexProvider which handles platform-specific details
+from .index_provider import IndexProvider
+
+# Import Result class - IndexProvider will handle the platform-specific implementation
 from byaldi.objects import Result
 
 # Import centralized configuration
-from config import VISUAL_CONFIG as Config, WORKSPACE_ROOT
+from src.config import VISUAL_CONFIG as Config, WORKSPACE_ROOT
 
 # Ensure index directory exists
 INDEX_ROOT = Config.INDEX_ROOT
@@ -50,73 +49,37 @@ class PDFCollection(BaseModel):
     pdfs: List[PDFMetadata]
 
 
-# Configure rich logging
-logging.basicConfig(
-    level="DEBUG",
-    format="%(message)s",
-    datefmt="[%X]",
-    handlers=[RichHandler(rich_tracebacks=True)]
-)
+# Configure rich logging - but only if not already configured
+if not logging.getLogger().handlers:
+    logging.basicConfig(
+        level=os.getenv("LOG_LEVEL", "DEBUG"),
+        format="%(message)s",
+        datefmt="[%X]",
+        handlers=[RichHandler(rich_tracebacks=True)]
+    )
 logger = logging.getLogger(__name__)
+logger.setLevel(os.getenv("LOG_LEVEL", "DEBUG"))
+
+# Add a direct print to verify this module is loaded
+print(f"Visual search module loaded with log level: {logger.level}")
 
 class VisualSearch:
     """Vectorizes PDFs (visually) using Byaldi, storing indexes on disk."""
-    
-    # Class-level variables for shared resources
-    _index_instance = None
-    _index_lock = threading.RLock()  # Lock for initializing the index
-    
-    @classmethod
-    def initialize_shared_index(cls, index_name: str = "visual_books"):
-        """Initialize the shared index that will be used by all instances.
-        
-        This should be called once at application startup.
-        
-        Args:
-            index_name: Name of the Byaldi index
-        """
-        with cls._index_lock:
-            if cls._index_instance is None:
-                index_root = INDEX_ROOT
-                if index_root.exists():
-                    logger.info("Initializing shared RAGMultiModalModel from index")
-                    cls._index_instance = RAGMultiModalModel.from_index(
-                        index_path=index_name)
-                    logger.info("Shared RAGMultiModalModel initialized successfully")
-                else:
-                    raise FileNotFoundError(f"Index directory {index_root} does not exist. Please create it first.")
-                
-    @classmethod
-    def close_shared_index(cls):
-        """Close the shared index and free resources."""
-        with cls._index_lock:
-            if cls._index_instance is not None:
-                logger.info("Closing shared RAGMultiModalModel")
-                del cls._index_instance
-                cls._index_instance = None
-                gc.collect()
-                logger.info("Shared RAGMultiModalModel closed successfully")
     
     def __init__(self, index_name: str = "visual_books"):
         """Initialize a new VisualSearch instance that uses the shared index.
         
         Args:
-            index_name: Name of the Byaldi index (used only if shared index not initialized)
+            index_name: Name of the Byaldi index
         """
         self.index_name = index_name
         self.index_root = Config.INDEX_ROOT
         
-        # Initialize shared index if not already done
-        with VisualSearch._index_lock:
-            if VisualSearch._index_instance is None:
-                VisualSearch.initialize_shared_index(index_name)
-            
-            # Get a reference to the shared index
-            self.RAG = VisualSearch._index_instance
-            
-            # Each instance has its own copy of doc_ids_to_file_names
-            # This is a read-only operation so it's thread-safe
-            self.doc_ids_to_file_names = self.RAG.get_doc_ids_to_file_names()
+        # Get the RAG model from the IndexProvider
+        self.RAG = IndexProvider.get_index(index_name)
+        
+        # Get the document IDs to file names mapping
+        self.doc_ids_to_file_names = IndexProvider.get_doc_ids_to_file_names()
 
     def search(
         self,
@@ -142,16 +105,9 @@ class VisualSearch:
         """
         if k < 1:
             raise ValueError("k must be positive")
-        
-        # Ensure we have access to the shared index
-        if VisualSearch._index_instance is None:
-            raise RuntimeError("Shared index not initialized")
             
-        # No need for a lock during search since RAG.search is read-only
-        # and each instance has its own doc_ids_to_file_names
-        
         if not self.doc_ids_to_file_names:
-            self.doc_ids_to_file_names = self.RAG.get_doc_ids_to_file_names()
+            self.doc_ids_to_file_names = IndexProvider.get_doc_ids_to_file_names()
         if not self.doc_ids_to_file_names:
             raise ValueError("No documents indexed")
             
@@ -249,7 +205,7 @@ class VisualSearch:
         """Properly close and cleanup instance resources.
         
         Note: This does not close the shared index, only instance-specific resources.
-        To close the shared index, use VisualSearch.close_shared_index().
+        To close the shared index, use IndexProvider.close_index().
         """
         # Clear instance-specific resources
         self.doc_ids_to_file_names = None
@@ -261,3 +217,21 @@ class VisualSearch:
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.close()
+
+    @classmethod
+    def initialize_shared_index(cls, index_name: str = "visual_books"):
+        """Initialize the shared index that will be used by all instances.
+        
+        This should be called once at application startup.
+        
+        Args:
+            index_name: Name of the Byaldi index
+        """
+        # Delegate to IndexProvider
+        IndexProvider.get_index(index_name)
+    
+    @classmethod
+    def close_shared_index(cls):
+        """Close the shared index and free resources."""
+        # Delegate to IndexProvider
+        IndexProvider.close_index()

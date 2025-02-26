@@ -4,6 +4,7 @@ This module contains all configuration classes and settings used throughout the 
 """
 
 import os
+import platform
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Any
@@ -17,6 +18,9 @@ if not load_dotenv():
 
 # Get workspace root
 WORKSPACE_ROOT = Path(__file__).parent.parent.absolute()
+
+# Detect system type
+is_apple_silicon = platform.system() == "Darwin" and platform.machine().startswith("arm")
 
 # ======================
 # LLM Configuration
@@ -117,7 +121,9 @@ class VisualSearchConfig:
     DPI: int = 300
     CHUNK_SIZE: int = 10
     MODEL_NAME: str = "vidore/colqwen2-v1.0"
-    DEVICE: str = "cpu"
+    # Device selection is handled by the platform-specific implementation
+    # This is just a default that may be overridden
+    DEVICE: str = "auto"  # Let the implementation decide based on platform
     IMAGE_FORMAT: str = "png"
     INDEX_ROOT: Path = WORKSPACE_ROOT / '.byaldi'
     FILTER_MULTIPLIER: int = 3  # Get 3x results when filtering to ensure enough after filtering
