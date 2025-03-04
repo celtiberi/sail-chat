@@ -45,11 +45,6 @@ ENV/
 logs/
 forum_chat.log
 
-# Chainlit specific
-.chainlit/
-!.chainlit/config.toml
-.chainlit/chat_history/
-.chainlit/cache/
 
 # Database
 *.db
