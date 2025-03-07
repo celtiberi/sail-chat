@@ -20,6 +20,9 @@ import atexit
 import platform
 from src.session_manager import SessionManager
 from src.visual_index.index_provider import IndexProvider
+from chainlit import Chainlit
+from utils.logger import ConversationLogger
+import uuid
 
 # Check if running on Apple Silicon and configure PyTorch appropriately
 is_apple_silicon = platform.system() == 'Darwin' and platform.machine() == 'arm64'
@@ -416,3 +419,35 @@ if __name__ == "__main__":
     
     # Run the Chainlit application
     run_chainlit(__file__)
+
+# Initialize the conversation logger
+logger = ConversationLogger()
+
+@Chainlit.on_message
+async def on_message(message):
+    # Get or create session ID
+    session_id = message.session_id or str(uuid.uuid4())
+    
+    # Process the message and get response
+    response = await process_message(message)
+    
+    # Log the interaction
+    logger.log_interaction(
+        session_id=session_id,
+        user_message=message.content,
+        assistant_message=response.content,
+        metadata={
+            "message_id": message.id,
+            "user_id": message.user_id,
+            "timestamp": message.timestamp,
+            "has_attachments": bool(message.attachments),
+            "attachments": [a.name for a in message.attachments] if message.attachments else []
+        }
+    )
+    
+    return response
+
+async def process_message(message):
+    # Your existing message processing logic here
+    # This should return a Chainlit response
+    pass
