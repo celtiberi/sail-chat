@@ -420,7 +420,7 @@ if __name__ == "__main__":
     run_chainlit(__file__)
 
 # Initialize the conversation logger
-logger = ConversationLogger()
+conversation_logger = ConversationLogger()
 
 @cl.on_message
 async def on_message(message: cl.Message):
@@ -432,7 +432,7 @@ async def on_message(message: cl.Message):
         response = await main(message)  # Use the existing main function
         
         # Log the interaction
-        logger.log_interaction(
+        conversation_logger.log_interaction(
             session_id=session_id,
             user_message=message.content,
             assistant_message=response.content if hasattr(response, 'content') else str(response),
