@@ -422,11 +422,16 @@ if __name__ == "__main__":
 # Initialize the conversation logger
 conversation_logger = ConversationLogger()
 
+@cl.on_chat_start
+async def on_chat_start():
+    # Initialize session ID when chat starts
+    cl.user_session.set("session_id", str(uuid.uuid4()))
+
 @cl.on_message
 async def on_message(message: cl.Message):
     try:
-        # Get or create session ID
-        session_id = message.session_id or str(uuid.uuid4())
+        # Get session ID from user session
+        session_id = cl.user_session.get("session_id")
         
         # Process the message and get response
         response = await main(message)  # Use the existing main function
