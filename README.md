@@ -39,6 +39,12 @@ conda activate sea-captain
 # Install dependencies
 pip install -r requirements.txt
 
+# Install custom Byaldi module
+pip install -e custom_modules/byaldi
+
+# Set up Python path
+export PYTHONPATH=$PYTHONPATH:$(pwd)
+
 # Set up environment variables
 cp .env.example .env
 # Edit .env with your API keys and configuration
@@ -48,8 +54,8 @@ cp .env.example .env
 
 ### Starting the Application
 
-```bash
-python src/app.py
+```
+chainlit run src/app.py
 ```
 
 ### Example Queries
