@@ -253,20 +253,23 @@ async def on_message(message: cl.Message):
         # Get session ID from user session
         session_id = cl.user_session.get("session_id")
         
+        # Debug logging to see what attributes are available
+        logger.debug(f"Message attributes: {dir(message)}")
+        
         # Process the message and get response
         response = await main(message)  # Use the existing main function
+        
+        # Create metadata with only the most basic attributes we know exist
+        metadata = {
+            "message_id": getattr(message, 'id', None),  # Safely get id if it exists
+        }
         
         # Log the interaction
         conversation_logger.log_interaction(
             session_id=session_id,
             user_message=message.content,
             assistant_message=response.content if hasattr(response, 'content') else str(response),
-            metadata={
-                "message_id": message.id,
-                "timestamp": message.timestamp,
-                "has_attachments": bool(message.attachments),
-                "attachments": [a.name for a in message.attachments] if message.attachments else []
-            }
+            metadata=metadata
         )
         
         return response

@@ -1,4 +1,4 @@
-# Sea Captain: Multimodal Sailing Assistant
+# Sailors Parrot: Multimodal Sailing Assistant
 
 A sophisticated AI-powered chatbot designed to help new sailors understand the ways of the sea. This assistant combines the wisdom of an experienced sea captain with modern retrieval-augmented generation (RAG) technology and multimodal capabilities to provide comprehensive, accurate information about sailing and boating.
 
