@@ -151,28 +151,26 @@ def create_chain(retriever: Retriever):
     return graph_builder.compile()
 
 @cl.on_chat_start
-async def init():
+async def on_chat_start():
     try:
-        logger.info(f"\n{LOG_SEPARATOR}")
-        logger.info("Initializing chat session")
+        # Initialize session ID when chat starts
+        cl.user_session.set("session_id", str(uuid.uuid4()))
         
+        # Initialize the session manager
         session = SessionManager(State)
         cl.user_session.set("session", session)
-
+        
         # Initialize LLM with streaming enabled
         llm = ChatGoogleGenerativeAI(
             model=CONFIG.llm.model_name,
             temperature=CONFIG.llm.temperature,
             max_output_tokens=CONFIG.llm.max_tokens,
             top_p=CONFIG.llm.top_p,
-            streaming=True,  # Enable streaming
+            streaming=True,
         )
-        logger.info("LLM initialized with streaming enabled")
         
         # Create a new VisualSearch instance for this user session
-        # This uses the shared index but has its own instance for thread safety
         visual_search = VisualSearch()
-        logger.info("VisualSearch instance created for this session")
         
         # Create retriever with shared resources
         retriever = Retriever(
@@ -188,21 +186,15 @@ async def init():
         cl.user_session.set("chain", chain)
         cl.user_session.set("state", State(question=""))
         cl.user_session.set("settings", UserSettings())
-        cl.user_session.set("visual_search", visual_search)  # Store for cleanup later
-
-        # Add a comment to explain the use of RETRIEVER_CONFIG
-        # Using retriever configuration imported from retriever.py
-        logger.info(f"Using forum collection: {RETRIEVER_CONFIG.forum_collection}")
-        logger.info(f"Retrieving up to {RETRIEVER_CONFIG.num_forum_results} forum documents")
+        cl.user_session.set("visual_search", visual_search)
         
-        # Update the message to reflect the configuration source
         await cl.Message(
             content="Ready to answer questions about sailing and boating!",
             author="Assistant"
         ).send()
         
     except Exception as e:
-        await handle_error(e, "initialization")
+        await handle_error(e, "chat initialization")
 
 def format_docs_as_sources(docs: List[Document]) -> List[cl.Text]:
     """Format documents as source elements."""
@@ -256,10 +248,41 @@ async def create_detailed_step(name: str, description: str = None, show_input: b
     return step
 
 @cl.on_message
+async def on_message(message: cl.Message):
+    try:
+        # Get session ID from user session
+        session_id = cl.user_session.get("session_id")
+        
+        # Process the message and get response
+        response = await main(message)  # Use the existing main function
+        
+        # Log the interaction
+        conversation_logger.log_interaction(
+            session_id=session_id,
+            user_message=message.content,
+            assistant_message=response.content if hasattr(response, 'content') else str(response),
+            metadata={
+                "message_id": message.id,
+                "timestamp": message.timestamp,
+                "has_attachments": bool(message.attachments),
+                "attachments": [a.name for a in message.attachments] if message.attachments else []
+            }
+        )
+        
+        return response
+    except Exception as e:
+        await handle_error(e, "message processing")
+
 async def main(message: cl.Message):
     try:
+        # Get session from user session
         session = cl.user_session.get("session")
+        if not session:
+            raise ValueError("Session not initialized")
+            
         chain = cl.user_session.get("chain")
+        if not chain:
+            raise ValueError("Chain not initialized")
         
         # Create state for this retrieval process
         session.model.question = message.content
@@ -274,9 +297,6 @@ async def main(message: cl.Message):
         # Store the steps dictionary in the session for the nodes to access
         session.model.steps = steps
         
-        # Log that we're about to run the chain with streaming
-        logger.info("Running chain with streaming enabled")
-        
         # Create a message object for streaming that we'll use internally
         temp_msg = cl.Message(content="", author="Assistant")
         await temp_msg.send()  # Send the empty message so we can stream to it
@@ -285,20 +305,14 @@ async def main(message: cl.Message):
         # Run the chain
         result = await chain.ainvoke(session.model.model_dump())
         
-        # No need to create a new message since we've already streamed to temp_msg
-        logger.info("Response streaming completed")
-        
         # Batch updates
         with session.batch_update() as state:
             state.running_context = result["running_context"]
             state.chat_history = result["chat_history"]
             state.chat_history.append({"role": "human", "content": message.content})
             state.chat_history.append({"role": "assistant", "content": result["answer"]})
-            # Clear the message reference after use
             state.current_message = None
-            # Clear the steps dictionary after use
             state.steps = {}
-            # Clear the updated_steps dictionary after use
             state.updated_steps = {}
         
         # Add sources if needed
@@ -306,6 +320,8 @@ async def main(message: cl.Message):
         if settings.show_sources and result.get("current_context"):
             temp_msg.elements = format_docs_as_sources(result["current_context"])
             await temp_msg.update()
+            
+        return temp_msg
         
     except Exception as e:
         logger.error("Error in message processing", exc_info=True)
@@ -421,35 +437,3 @@ if __name__ == "__main__":
 
 # Initialize the conversation logger
 conversation_logger = ConversationLogger()
-
-@cl.on_chat_start
-async def on_chat_start():
-    # Initialize session ID when chat starts
-    cl.user_session.set("session_id", str(uuid.uuid4()))
-
-@cl.on_message
-async def on_message(message: cl.Message):
-    try:
-        # Get session ID from user session
-        session_id = cl.user_session.get("session_id")
-        
-        # Process the message and get response
-        response = await main(message)  # Use the existing main function
-        
-        # Log the interaction
-        conversation_logger.log_interaction(
-            session_id=session_id,
-            user_message=message.content,
-            assistant_message=response.content if hasattr(response, 'content') else str(response),
-            metadata={
-                "message_id": message.id,
-                "user_id": message.user_id,
-                "timestamp": message.timestamp,
-                "has_attachments": bool(message.attachments),
-                "attachments": [a.name for a in message.attachments] if message.attachments else []
-            }
-        )
-        
-        return response
-    except Exception as e:
-        await handle_error(e, "message processing")
