@@ -1,19 +1,15 @@
 // Nautical Theme JavaScript
+// Load the gtag.js script dynamically
+var script = document.createElement('script');
+script.async = true;
+script.src = 'https://www.googletagmanager.com/gtag/js?id=G-WQQYFQL32V';
+document.head.appendChild(script);
 
-// Google Analytics
-(function () {
-    // Add Google Analytics script
-    const gaScript = document.createElement('script');
-    gaScript.async = true;
-    gaScript.src = 'https://www.googletagmanager.com/gtag/js?id=G-WQQYFQL32V';
-    document.head.appendChild(gaScript);
-
-    // Initialize Google Analytics
-    window.dataLayer = window.dataLayer || [];
-    function gtag() { dataLayer.push(arguments); }
-    gtag('js', new Date());
-    gtag('config', 'G-WQQYFQL32V');
-})();
+// Initialize gtag tracking
+window.dataLayer = window.dataLayer || [];
+function gtag() { dataLayer.push(arguments); }
+gtag('js', new Date());
+gtag('config', 'G-WQQYFQL32V');
 
 // Add wave animation to the background
 document.addEventListener('DOMContentLoaded', function() {
