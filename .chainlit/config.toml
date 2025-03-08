@@ -71,7 +71,7 @@ cot = "full"
 custom_css = "/public/nautical.css"
 
 # Custom JavaScript for nautical theme
-custom_js = "/nautical.js"
+custom_js = "/public/nautical.js"
 
 # Custom logo and meta image
 custom_meta_image_url = "/public/sea-captain-logo.png"

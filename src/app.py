@@ -10,10 +10,11 @@ from langchain_core.documents import Document
 import numpy as np
 from langchain_core.retrievers import BaseRetriever
 from pydantic import Field
-from src.retriever import Retriever
-from src.models import State
+from retriever import Retriever
+from models import ForumTopic, State
+from session_manager import SessionManager
 from langgraph.graph import START, StateGraph
-from src.visual_index.search import VisualSearch
+from visual_index.search import VisualSearch
 from langchain_chroma import Chroma
 from langchain_huggingface import HuggingFaceEmbeddings
 import atexit
@@ -431,12 +432,7 @@ def cleanup_resources():
 # Register the cleanup function to run when the application exits
 atexit.register(cleanup_resources)
 
-# Add this at the end of the file
-if __name__ == "__main__":
-    from chainlit.cli import run_chainlit
-    
-    # Run the Chainlit application
-    run_chainlit(__file__)
-
 # Initialize the conversation logger
 conversation_logger = ConversationLogger()
+
+# No need for direct Chainlit run since it's mounted by FastAPI

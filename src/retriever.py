@@ -1,14 +1,14 @@
 from langchain_core.documents import Document
 from typing_extensions import Literal, get_args
 from pydantic import BaseModel, Field
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.language_models import BaseChatModel
 from langchain_core.vectorstores import VectorStore
 import logging
 from dataclasses import dataclass
-from src.models import ForumTopic, State, Search
-from src.visual_index.search import VisualSearch
+from models import ForumTopic, State, Search
+from visual_index.search import VisualSearch
 import base64
 from PIL import Image
 from io import BytesIO
@@ -17,6 +17,7 @@ from langchain_chroma import Chroma
 from pathlib import Path
 import asyncio
 import chainlit as cl
+from langchain_core.retrievers import BaseRetriever
 
 # Import centralized configuration
 from src.config import RETRIEVER_CONFIG as CONFIG, WORKSPACE_ROOT
