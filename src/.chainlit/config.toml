@@ -53,27 +53,25 @@ edit_message = true
 
 [UI]
 # Name of the assistant.
-name = "Sailors Parrot"
+name = "Assistant"
 
-# Theme configuration
-default_theme = "dark"
-layout = "wide"
+# default_theme = "dark"
+
+# layout = "wide"
 
 # Description of the assistant. This is used for HTML tags.
-description = "Your AI-powered sailing and boating assistant"
+# description = ""
 
 # Chain of Thought (CoT) display mode. Can be "hidden", "tool_call" or "full".
 cot = "full"
 
-# Custom CSS for nautical theme
-custom_css = "/public/nautical.css"
-
-# Custom JavaScript for nautical theme
-custom_js = "/public/nautical.js"
-
 # Specify a CSS file that can be used to customize the user interface.
 # The CSS file can be served from the public directory or via an external link.
 # custom_css = "/public/test.css"
+
+# Specify a Javascript file that can be used to customize the user interface.
+# The Javascript file can be served from the public directory.
+# custom_js = "/public/test.js"
 
 # Specify a custom meta image url.
 # custom_meta_image_url = "https://chainlit-cloud.s3.eu-west-3.amazonaws.com/logo/chainlit_banner.png"

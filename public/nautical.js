@@ -1,8 +1,53 @@
 // Nautical Theme JavaScript
+console.log('nautical.js loading...');
+
+// Initialize Google Analytics
+if (!window.gtag) {  // Only initialize if not already present
+    console.log('Initializing Google Analytics...');
+
+    // Create and inject the gtag.js script
+    const gtagScript = document.createElement('script');
+    gtagScript.async = true;
+    gtagScript.src = 'https://www.googletagmanager.com/gtag/js?id=G-WQQYFQL32V';
+    document.head.appendChild(gtagScript);
+
+    // Initialize gtag
+    window.dataLayer = window.dataLayer || [];
+    window.gtag = function () { dataLayer.push(arguments); }
+    gtag('js', new Date());
+    gtag('config', 'G-WQQYFQL32V');
+
+    console.log('Google Analytics initialized');
+}
 
 document.addEventListener('DOMContentLoaded', function() {
+    console.log('DOMContentLoaded fired in nautical.js');
+    
+    
+    // Add animations to the document
+    const style = document.createElement('style');
+    style.textContent = `
+        @keyframes slideIn {
+            from { transform: translateX(100%); }
+            to { transform: translateX(0); }
+        }
+        @keyframes fadeOut {
+            from { opacity: 1; }
+            to { opacity: 0; }
+        }
+    `;
+    document.head.appendChild(style);
+
+    // Add the notification to the page
+    document.body.appendChild(notification);
+
+    // Remove the notification after animation
+    setTimeout(() => notification.remove(), 3500);
+
     // Initialize Google Analytics
     if (!window.gtag) {  // Only initialize if not already present
+        console.log('Initializing Google Analytics...');
+        
         // Create and inject the gtag.js script
         const gtagScript = document.createElement('script');
         gtagScript.async = true;
@@ -14,6 +59,8 @@ document.addEventListener('DOMContentLoaded', function() {
         window.gtag = function() { dataLayer.push(arguments); }
         gtag('js', new Date());
         gtag('config', 'G-WQQYFQL32V');
+        
+        console.log('Google Analytics initialized');
     }
 
     // Create wave animation container
@@ -33,38 +80,6 @@ document.addEventListener('DOMContentLoaded', function() {
     if (loadingIndicator) {
         loadingIndicator.classList.add('compass');
     }
-
-    // Add nautical-themed tooltips
-    const tooltips = document.querySelectorAll('[data-tooltip]');
-    tooltips.forEach(element => {
-        element.addEventListener('mouseenter', function() {
-            const tooltip = document.createElement('div');
-            tooltip.className = 'nautical-tooltip';
-            tooltip.textContent = this.getAttribute('data-tooltip');
-            this.appendChild(tooltip);
-        });
-
-        element.addEventListener('mouseleave', function() {
-            const tooltip = this.querySelector('.nautical-tooltip');
-            if (tooltip) {
-                tooltip.remove();
-            }
-        });
-    });
-
-    // Add smooth scrolling for anchor links
-    document.querySelectorAll('a[href^="#"]').forEach(anchor => {
-        anchor.addEventListener('click', function(e) {
-            e.preventDefault();
-            const target = document.querySelector(this.getAttribute('href'));
-            if (target) {
-                target.scrollIntoView({
-                    behavior: 'smooth',
-                    block: 'start'
-                });
-            }
-        });
-    });
 });
 
 // Add nautical-themed message animations
