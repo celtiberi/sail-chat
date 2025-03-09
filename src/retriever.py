@@ -1,27 +1,29 @@
 from langchain_core.documents import Document
 from typing_extensions import Literal, get_args
 from pydantic import BaseModel, Field
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Union
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.language_models import BaseChatModel
 from langchain_core.vectorstores import VectorStore
 import logging
 from dataclasses import dataclass
 from models import ForumTopic, State, Search
-from visual_index.search import VisualSearch
-import base64
+from services.client import ServiceClient
 from PIL import Image
 from io import BytesIO
+import base64
 import os
 from langchain_chroma import Chroma
 from pathlib import Path
 import asyncio
 import chainlit as cl
 from langchain_core.retrievers import BaseRetriever
+from langchain_google_genai import ChatGoogleGenerativeAI
 
 # Import centralized configuration
-from src.config import RETRIEVER_CONFIG as CONFIG, WORKSPACE_ROOT
+from src.config import RETRIEVER_CONFIG as CONFIG, WORKSPACE_ROOT, APP_CONFIG
 
+# Configure logging
 logger = logging.getLogger(__name__)
 
 # Get list of topics from the Literal type
@@ -77,31 +79,40 @@ class Retriever:
     """Handles document retrieval and response generation."""
     
     def __init__(
-        self,
-        llm: BaseChatModel,
+        self, 
         embedding_model: str = "all-MiniLM-L6-v2",
-        visual_search=None,  # Visual search instance
-        forum_store=None     # ChromaDB instance
+        llm: Optional[BaseChatModel] = None
     ):
         """
-        Initialize the retriever with LLM and optional shared resources.
+        Initialize the retriever and create the LLM.
         
         Args:
-            llm: The language model to use for query analysis and response generation
-            embedding_model: Name of the embedding model (only used if forum_store not provided)
-            visual_search: Optional shared VisualSearch instance
-            forum_store: Optional shared ChromaDB instance
+            embedding_model: Name of the embedding model (only used for logging)
+            llm: Optional language model to use. If not provided, one will be created.
         """
-        self.llm = llm
-        self.visual_search = visual_search
-        
-        # Use the provided forum_store or raise an error
-        if forum_store:
-            self.forum_store = forum_store
-            logger.info("Using provided ChromaDB instance")
+        # Create or use the provided LLM
+        if llm is None:
+            logger.info(f"Creating LLM: {APP_CONFIG.llm.model_name} with max_tokens: {APP_CONFIG.llm.max_tokens}")
+            self.llm = ChatGoogleGenerativeAI(
+                model=APP_CONFIG.llm.model_name,
+                temperature=APP_CONFIG.llm.temperature,
+                # max_output_tokens=APP_CONFIG.llm.max_tokens,
+                # top_p=APP_CONFIG.llm.top_p,
+                streaming=True,
+            )
+            # Log the actual configuration used
+            logger.info(f"LLM Configuration: model={APP_CONFIG.llm.model_name}, "
+                       f"temperature={APP_CONFIG.llm.temperature}, "
+                       f"max_output_tokens={APP_CONFIG.llm.max_tokens}, "
+                       f"top_p={APP_CONFIG.llm.top_p}")
         else:
-            logger.warning("No ChromaDB instance provided - retrieval functionality will be limited")
-            self.forum_store = None
+            self.llm = llm
+            logger.info("Using provided LLM")
+        
+        # Initialize the service client
+        services_url = os.getenv("SERVICES_URL", "http://localhost:8081")
+        self.service_client = ServiceClient(services_url)
+        logger.info(f"Initialized ServiceClient with URL: {services_url}")
         
         # Create query analysis prompt
         self.query_prompt = ChatPromptTemplate.from_messages([
@@ -183,15 +194,27 @@ class Retriever:
             logger.error(f"Error analyzing query: {str(e)}", exc_info=True)
             return {
                 "query": {
-                    "topics": "General Sailing Forum"
+                    "topics": ""
                 }
             }
 
+   
+
     async def retrieve(self, state: State) -> Dict[str, List[Document]]:
-        """Retrieve relevant documents from both forum and book collections."""
+        """
+        Retrieve relevant documents for the query.
+        
+        Args:
+            state: The current state object
+            
+        Returns:
+            Dictionary with retrieved documents
+        """
         try:
-            logger.info("Retrieving query")
-            logger.info(f"Retrieving documents for query: {state.query}")
+            # Get the query from the state
+            query = state.query.query if state.query else state.question
+            if not query:
+                raise ValueError("No query provided")
             
             # Create and send the retrieve step without ephemeral parameter
             retrieve_step = cl.Step(name="Retrieve Documents", type="tool", show_input=True)
@@ -204,102 +227,150 @@ class Retriever:
             # Update the retrieve step
             retrieve_step.output = f"Retrieving documents for: {state.query.query}"
             await retrieve_step.update()
-            
-            # Get forum documents
+
+            # Get documents from forum content
             forum_docs = []
-            if self.forum_store:
-                forum_docs = await self.forum_store.asimilarity_search(
-                    query=state.query.query,
+            try:
+                # Search the forum content using the service
+                logger.info(f"Searching ChromaDB with query: '{query}', filter: {filter}")
+                forum_docs = await self.service_client.chroma_search(
+                    query=query,
                     k=CONFIG.num_forum_results,
                     filter={"topics": state.query.topics}
                 )
-                logger.info(f"Retrieved {len(forum_docs)} forum docs")
-            else:
-                logger.warning("Forum store not available - skipping forum retrieval")
+                
+                logger.info(f"Retrieved {len(forum_docs)} documents from forum content")
+
+            except Exception as e:
+                logger.error(f"Error retrieving forum documents: {e}")
             
-            # Get visual search results if available
+            # Get documents from visual search
             visual_docs = []
             visual_files = []
-            if self.visual_search:
-                try:
-                    results, raw_files = self.visual_search.search(
-                        query=state.query.query,
-                        k=CONFIG.visual_doc_search_k  # Use the configured value
-                    )
-                    # Rewrite paths to be relative to working directory
-                    files = []
-                    for file in raw_files:
-                        # Split at data/pdfs and take the second part
-                        relative_path = str(file).split("data/pdfs")[-1]
-                        # Create new path from workspace root instead of current working directory
-                        files.append(str(WORKSPACE_ROOT / "data/pdfs" / relative_path.lstrip("/")))
+            try:
+                # Use the service to search
+                results, paths = await self.service_client.visual_search(
+                    query=query,
+                    k=5
+                )
+                
+                # Convert paths to strings and store them
+                string_paths = [str(path) for path in paths]
+                
+                # Process each visual search result
+                for i, (result, path_str) in enumerate(zip(results, string_paths)):
+                    # Initialize variables
+                    full_path = ""
+                    img_base64 = None
                     
-                    # Convert results to Documents
-                    for result, file in zip(results, files):
-                        # Get additional metadata from Byaldi
-                        metadata = self.visual_search.RAG.model.doc_id_to_metadata[result.doc_id][0]
+                    try:
+                        # Construct the full path by prepending CONFIG.data_dir / 'pdfs'
+                        full_path = str(CONFIG.data_dir / 'pdfs' / path_str)
+                        logger.info(f"Attempting to load image from: {full_path}")
                         
-                        # Load and encode the image
-                        try:
-                            with Image.open(file) as img:
+                        # Check if the file exists
+                        if not os.path.exists(full_path):
+                            logger.warning(f"File does not exist: {full_path}")
+                            # Try alternative paths
+                            alt_paths = [
+                                str(WORKSPACE_ROOT / 'data' / 'pdfs' / path_str),
+                                str(Path(path_str)),  # Try the path as-is
+                                str(Path('data') / 'pdfs' / path_str)
+                            ]
+                            
+                            # Try each alternative path
+                            for alt_path in alt_paths:
+                                logger.info(f"Trying alternative path: {alt_path}")
+                                if os.path.exists(alt_path):
+                                    full_path = alt_path
+                                    logger.info(f"Using alternative path: {full_path}")
+                                    break
+                            else:
+                                logger.warning(f"Could not find the image file in any of the tried paths")
+                        
+                        # Load and encode the image if the file exists
+                        if os.path.exists(full_path):
+                            with Image.open(full_path) as img:
                                 # Convert image to bytes
                                 img_byte_arr = BytesIO()
                                 img.save(img_byte_arr, format='PNG')
                                 img_byte_arr = img_byte_arr.getvalue()
                                 # Convert to base64
                                 img_base64 = base64.b64encode(img_byte_arr).decode('utf-8')
-                        except Exception as e:
-                            logger.error(f"Error loading image {file}: {str(e)}")
-                            img_base64 = None
-                        
-                        # Create a richer description of what was found
-                        description = (
-                            f"Visual result from {file} with confidence score {result.score:.2f}.\n"
+                                logger.info(f"Successfully loaded and encoded image: {full_path}")
+                        else:
+                            logger.warning(f"Skipping image encoding as file does not exist: {full_path}")
+                    except Exception as e:
+                        logger.error(f"Error loading image {full_path}: {e}")
+                        img_base64 = None
+                    
+                    # Extract metadata from the result
+                    metadata = result.metadata if hasattr(result, 'metadata') else {}
+                    
+                    # Create a rich description of the image
+                    description = (
+                        f"Visual result from {path_str} with confidence score {result.score:.2f}.\n"
+                    )
+                    
+                    # Add additional metadata to the description if available
+                    if isinstance(metadata, dict):
+                        description += (
                             f"This image shows {metadata.get('description', 'a sailing-related scene')}.\n"
-                            f"Book: {metadata.get('book_title', 'Unknown')}\n"
-                            f"Chapter: {metadata.get('chapter', 'N/A')}\n"
-                            f"Page: {metadata.get('page', 'N/A')}"
                         )
-                        
-                        # Add base64 image to metadata if available
-                        if img_base64:
-                            metadata['image_base64'] = img_base64
-                        
-                        visual_docs.append(Document(
-                            page_content=description,
-                            metadata={
-                                "source": str(file),
-                                "score": result.score,
-                                "type": "visual",
-                                "doc_id": result.doc_id,
-                                **metadata  # Include all additional metadata
-                            }
-                        ))
-                    visual_files = files
-                    logger.info(f"Retrieved {len(visual_docs)} visual results")
-                except Exception as e:
-                    logger.error(f"Error in visual search: {str(e)}", exc_info=True)
-            else:
-                logger.info("Visual search not available - skipping visual retrieval")
+                    
+                    # Create the document metadata
+                    doc_metadata = {
+                        "source": full_path,  # Use the full path in the metadata
+                        "score": result.score,
+                        "type": "visual",
+                        "doc_id": result.doc_id
+                    }
+                    
+                    # Add the base64 image to metadata if available
+                    if img_base64:
+                        doc_metadata['image_base64'] = img_base64
+                    
+                    # Add any additional metadata from the result
+                    if isinstance(metadata, dict):
+                        doc_metadata.update(metadata)
+                    
+                    # Create the document
+                    doc = Document(
+                        page_content=description,
+                        metadata=doc_metadata
+                    )
+                    
+                    visual_docs.append(doc)
+                
+                # Store the paths (use the full paths where possible)
+                visual_files = []
+                for path_str in string_paths:
+                    full_path = str(CONFIG.data_dir / 'pdfs' / path_str)
+                    if os.path.exists(full_path):
+                        visual_files.append(full_path)
+                    else:
+                        # Try alternative paths
+                        alt_path = str(WORKSPACE_ROOT / 'data' / 'pdfs' / path_str)
+                        if os.path.exists(alt_path):
+                            visual_files.append(alt_path)
+                        else:
+                            # Fall back to the original path
+                            visual_files.append(str(path_str))
+                
+                logger.info(f"Retrieved {len(visual_docs)} documents from visual search")
+            except Exception as e:
+                logger.error(f"Error retrieving visual documents: {e}")
             
-
+            # Combine all documents
+            all_docs = forum_docs + visual_docs
             
-            # Combine results, removing duplicates while preserving order
-            seen_ids = set()
-            combined_docs = []
-            
-            # Add forum docs first
-            for doc in forum_docs:
-                doc_id = doc.id  # Will raise KeyError if id missing
-                if doc_id not in seen_ids:
-                    seen_ids.add(doc_id)
-                    combined_docs.append(doc)
-            
-            
-            logger.info(f"Combined into {len(combined_docs)} unique documents")
+            # Store the documents in the state
+            state.current_context = all_docs
+            state.visual_context = visual_docs
+            state.visual_files = visual_files
             
             # Update step with the result
-            retrieve_step.output = f"Retrieved {len(combined_docs)} documents"
+            retrieve_step.output = f"Retrieved {len(all_docs)} documents"
             await retrieve_step.update()
                 
             # Mark the step as updated
@@ -308,27 +379,31 @@ class Retriever:
             
             await retrieve_step.remove()
             logger.info(f"Retrieve step removed")
-
+            
             return {
-                "current_context": combined_docs,
+                "current_context": all_docs,
                 "visual_context": visual_docs,
                 "visual_files": visual_files
             }
-            
-        except KeyError as e:
-            logger.error("Document missing required id in metadata", exc_info=True)
-            raise RetrievalError("Document integrity error: missing id in metadata")
         except Exception as e:
-            logger.error(f"Error retrieving documents: {str(e)}", exc_info=True)
-            raise RetrievalError(f"Failed to retrieve documents: {str(e)}")
+            logger.error(f"Error during retrieval: {e}")
+            raise RetrievalError(f"Failed to retrieve documents: {e}")
 
     async def generate(self, state: State) -> Dict[str, str]:
-        """Generate response using both current and running context."""
+        """
+        Generate response using both current and running context.
+        
+        Args:
+            state: The current state object
+            
+        Returns:
+            Dictionary with the generated response and updated state
+        """
         try:
             logger.info("Generating response from context")
-            logger.info(f"Initial state - current_context: {len(state.current_context)} docs, running_context: {len(state.running_context)} docs")
+            logger.info(f"Initial state - current_context: {len(state.current_context)} docs, running_context: {len(state.running_context if state.running_context else [])} docs")
             
-            # Create and send the generate step without ephemeral parameter
+             # Create and send the generate step without ephemeral parameter
             generate_step = cl.Step(name="Generate Response", type="run", show_input=False)
             await generate_step.send()
             
@@ -340,11 +415,13 @@ class Retriever:
             await generate_step.update()
             
             # Remove docs from running context that are in current context
-            current_ids = {doc.id for doc in state.current_context}
-            filtered_running_docs = [
-                doc for doc in state.running_context 
-                if doc.id not in current_ids
-            ]
+            current_ids = {getattr(doc, 'id', i) for i, doc in enumerate(state.current_context)}
+            filtered_running_docs = []
+            if state.running_context:
+                filtered_running_docs = [
+                    doc for i, doc in enumerate(state.running_context) 
+                    if getattr(doc, 'id', i) not in current_ids
+                ]
             
             # Add current docs at front, running docs at back
             combined_docs = state.current_context + filtered_running_docs
@@ -353,7 +430,7 @@ class Retriever:
             combined_docs = combined_docs[:CONFIG.doc_window_size]
             
             # Trim chat history if needed
-            chat_history = state.chat_history
+            chat_history = state.chat_history if state.chat_history else []
             if len(chat_history) > CONFIG.chat_window_size * 2:
                 chat_history = chat_history[-CONFIG.chat_window_size * 2:]
             
@@ -385,11 +462,10 @@ class Retriever:
                 for i, doc in enumerate(state.visual_context):
                     if img_base64 := doc.metadata.get('image_base64'):
                         # Format as data URL with proper MIME type
-                        # Assuming JPEG format, adjust if needed
                         user_message_content.append({
                             "type": "image_url",
                             "image_url": {
-                                "url": f"data:image/jpeg;base64,{img_base64}"
+                                "url": f"data:image/png;base64,{img_base64}"
                             }
                         })
             
@@ -404,14 +480,6 @@ class Retriever:
             
             # Format the prompt to get the messages
             messages = await multimodal_prompt.ainvoke({})
-            
-            # Update generate step to show we're about to stream
-            generate_step.output = "Preparing to stream response..."
-            await generate_step.update()
-                
-            # Mark the step as updated
-            if hasattr(state, 'updated_steps'):
-                state.updated_steps['generate'] = True
             
             # Initialize an empty response
             full_response = ""
@@ -446,7 +514,7 @@ class Retriever:
             
             logger.info("Response streaming completed")
             response_content = full_response
-                
+            
             logger.info("Response generated successfully")
             
             return {
@@ -458,5 +526,24 @@ class Retriever:
             }
         
         except Exception as e:
-            logger.error(f"Error generating response: {str(e)}", exc_info=True)
+            logger.error(f"Error generating response: {e}")
             return {"answer": "Apologies, but I encountered an error while trying to answer your question."} 
+
+    
+    async def check_service_health(self) -> bool:
+        """
+        Check if the service is healthy.
+        
+        Returns:
+            True if the service is healthy, False otherwise
+        """
+        try:
+            is_healthy = await self.service_client.health_check()
+            if is_healthy:
+                logger.info("Service is healthy")
+            else:
+                logger.warning("Service is not healthy")
+            return is_healthy
+        except Exception as e:
+            logger.error(f"Error checking service health: {e}")
+            return False

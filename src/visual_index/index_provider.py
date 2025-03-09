@@ -11,16 +11,28 @@ import gc
 import logging
 import platform
 import threading
+import fcntl
 from pathlib import Path
 from typing import Dict, Optional, Any
 import pickle
 import tempfile
+import uuid
+import time
+import sys
+
+import numpy as np
+from PIL import Image
 
 # Configure logging
 logger = logging.getLogger(__name__)
 
-# Detect system type
-is_apple_silicon = platform.system() == 'Darwin' and platform.machine().startswith('arm')
+# Check if running on Apple Silicon
+is_apple_silicon = platform.processor() == 'arm' and platform.system() == 'Darwin'
+
+# Add the project root to the Python path
+project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if project_root not in sys.path:
+    sys.path.append(project_root)
 
 # Import the appropriate RAGMultiModalModel based on platform
 if is_apple_silicon:
@@ -40,6 +52,7 @@ from src.config import VISUAL_CONFIG as Config
 CACHE_DIR = Path(tempfile.gettempdir()) / "byaldi_cache"
 CACHE_DIR.mkdir(exist_ok=True)
 CACHE_FILE = CACHE_DIR / "index_instance_id.pkl"
+LOCK_FILE = CACHE_DIR / "index_lock"
 
 class IndexProvider:
     """
@@ -49,7 +62,7 @@ class IndexProvider:
     
     # Class-level variables for shared resources
     _index_instance = None
-    _index_lock = threading.RLock()  # Lock for initializing the index
+    _index_lock = threading.RLock()  # Lock for initializing the index within a process
     _index_id = None  # ID to check if we need to reload the index
     
     @classmethod
@@ -64,147 +77,146 @@ class IndexProvider:
             The initialized RAGMultiModalModel instance
         """
         with cls._index_lock:
-            # Check if we have a cached index ID
-            if cls._index_id is None:
-                # Try to load the index ID from the cache file
-                if CACHE_FILE.exists():
-                    try:
-                        with open(CACHE_FILE, 'rb') as f:
-                            cls._index_id = pickle.load(f)
-                            logger.info(f"Loaded index ID from cache: {cls._index_id}")
-                    except Exception as e:
-                        logger.warning(f"Failed to load index ID from cache: {e}")
-                        cls._index_id = None
+            # Check if we already have a valid instance
+            if cls._index_instance is not None:
+                return cls._index_instance
             
-            # If we have a valid index ID but no instance, try to get it from the global namespace
-            if cls._index_id is not None and cls._index_instance is None:
+            # Use file-based locking to coordinate between processes
+            with open(LOCK_FILE, 'w') as lock_file:
                 try:
-                    # Try to get the index from the global namespace using the ID
-                    import builtins
-                    if hasattr(builtins, f"_byaldi_index_{cls._index_id}"):
-                        cls._index_instance = getattr(builtins, f"_byaldi_index_{cls._index_id}")
-                        logger.info(f"Retrieved index instance from global namespace with ID: {cls._index_id}")
-                except Exception as e:
-                    logger.warning(f"Failed to retrieve index from global namespace: {e}")
-                    cls._index_id = None
-                    cls._index_instance = None
-            
-            # If we still don't have an index instance, initialize it
-            if cls._index_instance is None:
-                cls._initialize_index(index_name)
-                
-                # Store the index in the global namespace with a unique ID
-                import uuid
-                import builtins
-                cls._index_id = str(uuid.uuid4())
-                setattr(builtins, f"_byaldi_index_{cls._index_id}", cls._index_instance)
-                logger.info(f"Stored index instance in global namespace with ID: {cls._index_id}")
-                
-                # Save the index ID to the cache file
-                try:
-                    with open(CACHE_FILE, 'wb') as f:
-                        pickle.dump(cls._index_id, f)
-                        logger.info(f"Saved index ID to cache: {cls._index_id}")
-                except Exception as e:
-                    logger.warning(f"Failed to save index ID to cache: {e}")
-            
-            return cls._index_instance
+                    # Acquire an exclusive lock
+                    fcntl.flock(lock_file, fcntl.LOCK_EX)
+                    
+                    # Check again after acquiring the lock (another process might have initialized it)
+                    if cls._index_instance is not None:
+                        return cls._index_instance
+                    
+                    # Try to load from cache first
+                    if CACHE_FILE.exists():
+                        try:
+                            with open(CACHE_FILE, 'rb') as f:
+                                cached_data = pickle.load(f)
+                                cls._index_id = cached_data.get('id')
+                                logger.info(f"Found cached index ID: {cls._index_id}")
+                        except Exception as e:
+                            logger.warning(f"Error loading cache: {e}")
+                    
+                    # Initialize the index
+                    cls._initialize_index(index_name)
+                    
+                    # Save to cache
+                    if cls._index_instance is not None and cls._index_id is not None:
+                        try:
+                            with open(CACHE_FILE, 'wb') as f:
+                                pickle.dump({'id': cls._index_id}, f)
+                        except Exception as e:
+                            logger.warning(f"Error saving cache: {e}")
+                    
+                    return cls._index_instance
+                finally:
+                    # Release the lock
+                    fcntl.flock(lock_file, fcntl.LOCK_UN)
     
     @classmethod
     def _initialize_index(cls, index_name: str) -> None:
         """
-        Initialize the shared index that will be used by all instances.
+        Initialize the index with platform-specific optimizations.
         
         Args:
             index_name: Name of the Byaldi index
         """
-        index_root = Config.INDEX_ROOT
-        logger.info(f"Starting index initialization with index_name={index_name}")
-        logger.info(f"Index root path: {index_root}")
-        
-        if not index_root.exists():
-            logger.error(f"Index directory {index_root} does not exist")
-            raise FileNotFoundError(f"Index directory {index_root} does not exist. Please create it first.")
-        
         try:
-            logger.info(f"Loading model {Config.MODEL_NAME}")
-            logger.info("Initializing RAGMultiModalModel from index - this may take some time...")
+            # Check if we already have an instance in memory
+            if cls._index_instance is not None:
+                logger.info("Index already loaded in memory")
+                return
             
-            # Track memory before loading
+            logger.info(f"Starting index initialization with index_name={index_name}")
+            
+            # Get the index path from environment or config
+            index_root = os.getenv("VISUAL_INDEX_PATH", str(Config.INDEX_ROOT))
+            logger.info(f"Index root path: {index_root}")
+            
+            # Get the model name from environment or config
+            model_name = os.getenv("VISUAL_MODEL_NAME", Config.MODEL_NAME)
+            logger.info(f"Loading model {model_name}")
+            
+            # Get the device from environment or config
+            device = os.getenv("VISUAL_DEVICE", Config.DEVICE)
+            logger.info(f"Visual device: {device}  # or cuda if using GPU")
+            
+            # Log memory usage before loading
             import psutil
             process = psutil.Process(os.getpid())
-            mem_before = process.memory_info().rss / 1024 / 1024  # MB
-            logger.info(f"Memory usage before loading model: {mem_before:.2f} MB")
+            memory_info = process.memory_info()
+            logger.info(f"Memory usage before loading model: {memory_info.rss / 1024 / 1024:.2f} MB")
             
-            # Load the model with timing
-            import time
-            start_time = time.time()
+            # Initialize the model with the appropriate settings
+            logger.info("Initializing RAGMultiModalModel from index - this may take some time...")
             
-            # Load the index - the appropriate implementation will be used based on the platform
-            # On Apple Silicon: Uses our custom implementation with CPU and memory-mapped tensors
-            # On other platforms: Uses the standard implementation which can use GPU if available
-            cls._index_instance = RAGMultiModalModel.from_index(index_path=index_name)
+            # Generate a unique ID for this instance
+            cls._index_id = str(uuid.uuid4())
             
-            end_time = time.time()
+            # Convert the index path to an absolute path
+            absolute_index_path = os.path.join(project_root, index_root, index_name)
+            logger.info(f"Using absolute index path: {absolute_index_path}")
             
-            # Track memory after loading
-            mem_after = process.memory_info().rss / 1024 / 1024  # MB
-            logger.info(f"Memory usage after loading model: {mem_after:.2f} MB")
-            logger.info(f"Memory increase: {mem_after - mem_before:.2f} MB")
-            logger.info(f"Model loading took {end_time - start_time:.2f} seconds")
+            # Load the index
+            if is_apple_silicon:
+                # Apple Silicon: Use memory-mapped tensors and force CPU
+                cls._index_instance = RAGMultiModalModel.from_index(index_path=absolute_index_path)
+            else:
+                # Other platforms: Use standard initialization
+                cls._index_instance = RAGMultiModalModel.from_index(index_path=absolute_index_path)
             
-            # Log which device is being used (for informational purposes)
-            if hasattr(cls._index_instance, 'device'):
-                logger.info(f"Model loaded on device: {cls._index_instance.device}")
-            elif hasattr(cls._index_instance.model, 'device'):
-                logger.info(f"Model loaded on device: {cls._index_instance.model.device}")
+            # Log success
+            logger.info(f"Successfully initialized index with ID {cls._index_id}")
             
-            logger.info("RAGMultiModalModel initialized successfully")
         except Exception as e:
-            logger.error(f"Error initializing RAGMultiModalModel: {str(e)}", exc_info=True)
+            logger.error(f"Error initializing RAGMultiModalModel: {e}")
             raise
     
     @classmethod
     def close_index(cls) -> None:
-        """Close the shared index and free resources."""
+        """
+        Close the index and free resources.
+        """
         with cls._index_lock:
-            if cls._index_instance is not None:
-                logger.info("Closing shared RAGMultiModalModel")
-                
-                # Remove from global namespace if it exists there
-                if cls._index_id is not None:
-                    try:
-                        import builtins
-                        if hasattr(builtins, f"_byaldi_index_{cls._index_id}"):
-                            delattr(builtins, f"_byaldi_index_{cls._index_id}")
-                            logger.info(f"Removed index instance from global namespace with ID: {cls._index_id}")
-                    except Exception as e:
-                        logger.warning(f"Failed to remove index from global namespace: {e}")
-                
-                # Delete the instance and clear the cache file
-                del cls._index_instance
-                cls._index_instance = None
-                cls._index_id = None
-                
-                if CACHE_FILE.exists():
-                    try:
-                        CACHE_FILE.unlink()
-                        logger.info("Removed index ID cache file")
-                    except Exception as e:
-                        logger.warning(f"Failed to remove cache file: {e}")
-                
-                gc.collect()
-                logger.info("Shared RAGMultiModalModel closed successfully")
+            # Use file-based locking to coordinate between processes
+            with open(LOCK_FILE, 'w') as lock_file:
+                try:
+                    # Acquire an exclusive lock
+                    fcntl.flock(lock_file, fcntl.LOCK_EX)
+                    
+                    if cls._index_instance is not None:
+                        logger.info("Closing index and freeing resources")
+                        cls._index_instance = None
+                        cls._index_id = None
+                        
+                        # Clear the cache file
+                        if CACHE_FILE.exists():
+                            try:
+                                CACHE_FILE.unlink()
+                            except Exception as e:
+                                logger.warning(f"Error removing cache file: {e}")
+                finally:
+                    # Release the lock
+                    fcntl.flock(lock_file, fcntl.LOCK_UN)
     
     @classmethod
     def get_doc_ids_to_file_names(cls) -> Dict[int, str]:
         """
-        Get the mapping of document IDs to file names.
+        Get a mapping of document IDs to file names.
         
         Returns:
             A dictionary mapping document IDs to file names
         """
-        with cls._index_lock:
-            if cls._index_instance is None:
-                raise RuntimeError("Index not initialized")
-            return cls._index_instance.get_doc_ids_to_file_names() 
+        index = cls.get_index()
+        if index is None:
+            return {}
+        
+        try:
+            return index.get_doc_ids_to_file_names()
+        except Exception as e:
+            logger.error(f"Error getting doc_ids_to_file_names: {e}")
+            return {} 

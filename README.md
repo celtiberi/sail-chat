@@ -15,13 +15,22 @@ A sophisticated AI-powered chatbot designed to help new sailors understand the w
 
 ## Architecture
 
-The system is built on a modern RAG architecture with these key components:
+The system is built on a modern microservices architecture with these key components:
 
 - **Retriever**: Core component that handles document retrieval and response generation
-- **Visual Index**: Processes and indexes images for visual search capabilities
+- **Combined Services**: Standalone service that provides a unified API for:
+  - **Visual Search**: Processes and indexes images for visual search capabilities
+  - **ChromaDB**: Manages the vector database for semantic search of forum content
 - **LangChain Integration**: Leverages LangChain for prompt templates and LLM interactions
 - **Multimodal LLM**: Uses advanced language models capable of processing both text and images
 - **Platform Abstraction**: Automatically adapts to different hardware environments
+
+This microservices architecture improves resource efficiency and startup time by:
+- Loading resource-intensive components (visual index and ChromaDB) only once in the dedicated service
+- Allowing the main application to start faster
+- Reducing memory usage in the main application
+- Enabling better scalability and separation of concerns
+- Providing a unified API for all data retrieval operations
 
 For more details on the architecture, see [ARCHITECTURE.md](ARCHITECTURE.md).
 
@@ -54,9 +63,22 @@ cp .env.example .env
 
 ### Starting the Application
 
+Start the Combined Services:
+
+```bash
+# Start the Combined Services
+python scripts/start_services.py
 ```
-chainlit run src/app.py
+
+Then, in a separate terminal, start the main application:
+
+```bash
+# Start the main application
+python src/main.py
 ```
+
+The Combined Services will be available at http://localhost:8081
+The main application will be available at http://localhost:8080
 
 ### Example Queries
 

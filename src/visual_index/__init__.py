@@ -16,5 +16,5 @@ os.environ["USE_FLASH_ATTENTION"] = "0"
 # Disable tokenizers parallelism to avoid warnings
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
-# Import the search module
-from .search import VisualSearch 
+# Note: We no longer import VisualSearch here to avoid loading the model
+# when only the client is needed 

@@ -14,54 +14,30 @@ from retriever import Retriever
 from models import ForumTopic, State
 from session_manager import SessionManager
 from langgraph.graph import START, StateGraph
-from visual_index.search import VisualSearch
-from langchain_chroma import Chroma
-from langchain_huggingface import HuggingFaceEmbeddings
-import atexit
 import platform
-from src.session_manager import SessionManager
-from src.visual_index.index_provider import IndexProvider
 from utils.logger import ConversationLogger
 import uuid
-
-# Check if running on Apple Silicon and configure PyTorch appropriately
-is_apple_silicon = platform.system() == 'Darwin' and platform.machine() == 'arm64'
-if is_apple_silicon:
-    try:
-        import torch
-        print(f"Running on Apple Silicon: {is_apple_silicon}")
-        print(f"PyTorch version: {torch.__version__}")
-        print(f"PyTorch has MPS: {hasattr(torch, 'mps') and hasattr(torch.mps, 'is_available')}")
-        if hasattr(torch, 'mps') and hasattr(torch.mps, 'is_available'):
-            print(f"MPS is available: {torch.mps.is_available()}")
-            print("Note: Using CPU device for compatibility with memory-mapped tensor loading")
-    except ImportError:
-        print("PyTorch not available")
+from langchain.schema import SystemMessage, HumanMessage
 
 # Import centralized configuration
 from src.config import (
-    APP_CONFIG as CONFIG,
+    APP_CONFIG,
+    CONFIG,
     RETRIEVER_CONFIG,
     VISUAL_CONFIG,
     UserSettings,
-    WORKSPACE_ROOT
 )
 
 # Configure logging
-LOG_SEPARATOR = "=" * 50
-log_level = os.getenv("LOG_LEVEL", "INFO")
-print(f"Setting up logging with level: {log_level}")
+log_level = os.getenv("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(
     level=log_level,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     handlers=[
         logging.StreamHandler(),
         logging.FileHandler("forum_chat.log")
-    ],
-    force=True  # Override any existing logging configuration
+    ]
 )
-# Set the root logger level as well
-logging.getLogger().setLevel(log_level)
 logger = logging.getLogger(__name__)
 logger.setLevel(log_level)
 
@@ -69,61 +45,8 @@ logger.setLevel(log_level)
 logger.debug("DEBUG logging is enabled")
 logger.info("INFO logging is enabled")
 
-# Initialize shared resources at application startup
-# This ensures we only load resource-intensive components once
-try:
-    logger.info("Initializing shared resources")
-    
-    # Initialize VisualSearch shared index
-    logger.info("Initializing shared VisualSearch index - START")
-    logger.info(f"Visual index path: {VISUAL_CONFIG.INDEX_ROOT}")
-    logger.info(f"Visual model name: {VISUAL_CONFIG.MODEL_NAME}")
-    logger.info(f"Visual device: {VISUAL_CONFIG.DEVICE}")
-    
-    # Check if the index is already loaded (for hot reloading scenarios)
-    if IndexProvider._index_instance is None:
-        logger.info("Index not found in memory, initializing...")
-        start_time = perf_counter()
-        VisualSearch.initialize_shared_index()
-        end_time = perf_counter()
-        logger.info(f"VisualSearch shared index initialized successfully in {end_time - start_time:.2f} seconds")
-    else:
-        logger.info("VisualSearch shared index already loaded, skipping initialization")
-    
-    logger.info(f"Memory usage after VisualSearch initialization: {os.popen('ps -o rss -p %d | tail -n1' % os.getpid()).read().strip()} KB")
-    
-    # Initialize ChromaDB - this is the only place ChromaDB is initialized in the application
-    logger.info("Initializing shared ChromaDB instance - START")
-    logger.info(f"ChromaDB path: {RETRIEVER_CONFIG.get_db_path()}")
-    logger.info(f"ChromaDB collection: {RETRIEVER_CONFIG.forum_collection}")
-    
-    start_time = perf_counter()
-    chroma_path = RETRIEVER_CONFIG.get_db_path()
-    embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
-    logger.info("Embeddings model loaded")
-    
-    SHARED_CHROMA = Chroma(
-        persist_directory=chroma_path,
-        collection_name=RETRIEVER_CONFIG.forum_collection,
-        embedding_function=embeddings
-    )
-    end_time = perf_counter()
-    
-    logger.info(f"ChromaDB initialized successfully at {chroma_path} in {end_time - start_time:.2f} seconds")
-    logger.info(f"Memory usage after ChromaDB initialization: {os.popen('ps -o rss -p %d | tail -n1' % os.getpid()).read().strip()} KB")
-    logger.info("All shared resources initialized successfully")
-    
-except Exception as e:
-    logger.error(f"Error initializing shared resources: {str(e)}", exc_info=True)
-    SHARED_CHROMA = None
-
-def cosine_similarity(vec1: np.ndarray, vec2: np.ndarray) -> float:
-    """Compute cosine similarity between two vectors."""
-    norm1 = np.linalg.norm(vec1)
-    norm2 = np.linalg.norm(vec2)
-    if norm1 == 0 or norm2 == 0:
-        return 0.0
-    return np.dot(vec1, vec2) / (norm1 * norm2)
+# Initialize conversation logger
+conversation_logger = ConversationLogger()
 
 def create_chain(retriever: Retriever):
     """Create a LangGraph chain with validation."""
@@ -157,28 +80,12 @@ async def on_chat_start():
         # Initialize session ID when chat starts
         cl.user_session.set("session_id", str(uuid.uuid4()))
         
-        # Initialize the session manager
+        # Initialize the session manager with the State class
         session = SessionManager(State)
         cl.user_session.set("session", session)
         
-        # Initialize LLM with streaming enabled
-        llm = ChatGoogleGenerativeAI(
-            model=CONFIG.llm.model_name,
-            temperature=CONFIG.llm.temperature,
-            max_output_tokens=CONFIG.llm.max_tokens,
-            top_p=CONFIG.llm.top_p,
-            streaming=True,
-        )
-        
-        # Create a new VisualSearch instance for this user session
-        visual_search = VisualSearch()
-        
-        # Create retriever with shared resources
-        retriever = Retriever(
-            llm=llm,
-            visual_search=visual_search,
-            forum_store=SHARED_CHROMA
-        )
+        # Create retriever (LLM will be created internally)
+        retriever = Retriever()
         
         # Create chain with State class as schema
         chain = create_chain(retriever)
@@ -187,14 +94,15 @@ async def on_chat_start():
         cl.user_session.set("chain", chain)
         cl.user_session.set("state", State(question=""))
         cl.user_session.set("settings", UserSettings())
-        cl.user_session.set("visual_search", visual_search)
         
+        # Send a welcome message
         await cl.Message(
             content="Ready to answer questions about sailing and boating!",
-            author="Assistant"
+            author="Sailors Parrot"
         ).send()
         
     except Exception as e:
+        logger.error(f"Error during chat initialization: {e}")
         await handle_error(e, "chat initialization")
 
 def format_docs_as_sources(docs: List[Document]) -> List[cl.Text]:
@@ -302,7 +210,7 @@ async def main(message: cl.Message):
         session.model.steps = steps
         
         # Create a message object for streaming that we'll use internally
-        temp_msg = cl.Message(content="", author="Assistant")
+        temp_msg = cl.Message(content="", author="Sailors Parrot")
         await temp_msg.send()  # Send the empty message so we can stream to it
         session.model.current_message = temp_msg  # Store for streaming in the generate step
         
@@ -334,16 +242,20 @@ async def main(message: cl.Message):
 @cl.on_chat_end
 async def end():
     try:
-        # Clean up user-specific resources
-        visual_search = cl.user_session.get("visual_search")
-        if visual_search:
-            logger.info("Cleaning up user's VisualSearch instance")
-            visual_search.close()
-            logger.info("User's VisualSearch instance cleaned up")
+        # Get the retriever from the user session
+        chain = cl.user_session.get("chain")
+        if chain and hasattr(chain, "retriever"):
+            retriever = chain.retriever
+            
+            # Close the service client if it exists
+            if hasattr(retriever, "service_client"):
+                logger.info("Closing service client connection")
+                await retriever.service_client.close()
+                logger.info("Service client connection closed")
         
         await cl.Message(
             content="Chat session ended. Thank you for using the assistant!",
-            author="Assistant"
+            author="Sailors Parrot"
         ).send()
     except Exception as e:
         logger.error(f"Error during cleanup: {str(e)}")
@@ -405,34 +317,5 @@ async def handle_error(error: Exception, context: str):
         type="error"
     ).send()
 
-# Register cleanup function to ensure resources are released on application exit
-def cleanup_resources():
-    try:
-        logger.info("Application shutting down, cleaning up resources...")
-        
-        # Close the shared index
-        from visual_index.search import VisualSearch
-        logger.info("Closing shared VisualSearch index")
-        VisualSearch.close_shared_index()
-        
-        # Clean up ChromaDB
-        if 'SHARED_CHROMA' in globals():
-            try:
-                logger.info("Closing ChromaDB...")
-                # ChromaDB handles cleanup internally when Python exits
-                # but we can explicitly log it
-                logger.info("ChromaDB will be closed during Python shutdown")
-            except Exception as e:
-                logger.error(f"Error with ChromaDB cleanup: {str(e)}")
-        
-        logger.info("All resources cleaned up successfully")
-    except Exception as e:
-        logger.error(f"Error during application cleanup: {str(e)}", exc_info=True)
-
-# Register the cleanup function to run when the application exits
-atexit.register(cleanup_resources)
-
-# Initialize the conversation logger
-conversation_logger = ConversationLogger()
-
 # No need for direct Chainlit run since it's mounted by FastAPI
+
