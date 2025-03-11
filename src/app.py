@@ -219,7 +219,6 @@ async def main(message: cl.Message):
         
         # Batch updates
         with session.batch_update() as state:
-            state.running_context = result["running_context"]
             state.chat_history = result["chat_history"]
             state.chat_history.append({"role": "human", "content": message.content})
             state.chat_history.append({"role": "assistant", "content": result["answer"]})
@@ -228,10 +227,10 @@ async def main(message: cl.Message):
             state.updated_steps = {}
         
         # Add sources if needed
-        settings = cl.user_session.get("settings", UserSettings())
-        if settings.show_sources and result.get("current_context"):
-            temp_msg.elements = format_docs_as_sources(result["current_context"])
-            await temp_msg.update()
+        # settings = cl.user_session.get("settings", UserSettings())
+        # if settings.show_sources and result.get("current_context"):
+        #     temp_msg.elements = format_docs_as_sources(result["current_context"])
+        #     await temp_msg.update()
             
         return temp_msg
         

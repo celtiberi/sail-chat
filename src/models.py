@@ -68,12 +68,10 @@ class State(BaseModel):
     query: Search | None = Field(default_factory=Search.default)
     is_sailing_related: bool | None = None
     answer: str | None = None
-    current_context: List[Document] | None = Field(default_factory=list)  # Documents for current query
-    running_context: List[Document] | None = Field(default_factory=list)  # Accumulated context
+    forum_docs: List[Document] = Field(default_factory=list)  # Forum search results
+    visual_docs: List[Document] = Field(default_factory=list)  # Visual search results
     chat_history: List[Dict] | None = Field(default_factory=list)
     context: List[Document] | None = Field(default_factory=list)
-    visual_context: List[Document] = Field(default_factory=list)  # Visual search results
-    visual_files: List[str] = Field(default_factory=list)  # Paths to visual results
     current_step: Any = None  # Chainlit step for streaming responses
     current_message: Any = None  # Chainlit message for streaming responses
     steps: Dict[str, Any] = Field(default_factory=dict)  # Dictionary of steps for each node

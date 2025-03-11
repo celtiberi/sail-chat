@@ -1,7 +1,7 @@
 from langchain_core.documents import Document
 from typing_extensions import Literal, get_args
 from pydantic import BaseModel, Field
-from typing import List, Dict, Any, Optional, Union
+from typing import List, Dict, Any, Optional, Union, Tuple
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.language_models import BaseChatModel
 from langchain_core.vectorstores import VectorStore
@@ -19,6 +19,8 @@ import asyncio
 import chainlit as cl
 from langchain_core.retrievers import BaseRetriever
 from langchain_google_genai import ChatGoogleGenerativeAI
+import re
+import uuid
 
 # Import centralized configuration
 from src.config import RETRIEVER_CONFIG as CONFIG, WORKSPACE_ROOT, APP_CONFIG
@@ -47,8 +49,10 @@ BASE_SYSTEM_TEMPLATE = """
     Previous conversation:
     {chat_history}
     
-    Here's the relevant information from various sailing/boating sources:
+    Here's the relevant textual information from various sailing/boating sources:
     {context}
+    
+    Note: The user's message may also contain visual information (images) that provides additional context.
     
     Remember:
     1. Use nautical terms but explain them
@@ -198,212 +202,357 @@ class Retriever:
                 }
             }
 
-   
+    async def _prepare_forum_content(self, state: State) -> str:
+        """
+        Prepare forum documents by filtering, combining with running context, and formatting.
+        
+        Args:
+            state: The current state object
+            
+        Returns:
+            Formatted document content as a string
+        """
+        # Generate text content from documents
+        docs_content = "\n\n".join(doc.page_content for doc in state.forum_docs)
+        
+        return docs_content
+    
+    async def _prepare_visual_message_items(self, state: State) -> List[Dict]:
+        """
+        Prepare visual content items for the user message.
+        
+        Args:
+            state: The current state object
+            
+        Returns:
+            List of visual content items to add to the user message
+        """
+        visual_content = []
+        
+        # Add visual content if available
+        if state.visual_docs:
+            # Add a text description of the visual content
+            visual_descriptions = "\n\n".join(
+                f"Image {i+1} description: {doc.page_content}" 
+                for i, doc in enumerate(state.visual_docs)
+            )
+            visual_content.append({"type": "text", "text": visual_descriptions})
+            
+            # Add each image as a separate content item in the proper format
+            for i, doc in enumerate(state.visual_docs):
+                if img_base64 := doc.metadata.get('image_base64'):
+                    # Format as data URL with proper MIME type
+                    visual_content.append({
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/png;base64,{img_base64}"
+                        }
+                    })
+        
+        return visual_content
+
+    async def _load_image_from_path(self, path_str: str) -> Tuple[str, Optional[str]]:
+        """
+        Load and encode an image from a path.
+        
+        Args:
+            path_str: Path to the image file
+            
+        Returns:
+            Tuple containing the full path and base64-encoded image (or None if loading failed)
+        """
+        img_base64 = None
+        
+        try:
+            logger.info(f"Attempting to load image from: {path_str}")
+            
+            # Check if the file exists
+            if not os.path.exists(path_str):
+                logger.warning(f"File does not exist: {path_str}")
+                return None
+                
+            # Load and encode the image if the file exists
+            if os.path.exists(path_str):
+                with Image.open(path_str) as img:
+                    # Convert image to bytes
+                    img_byte_arr = BytesIO()
+                    img.save(img_byte_arr, format='PNG')
+                    img_byte_arr = img_byte_arr.getvalue()
+                    # Convert to base64
+                    img_base64 = base64.b64encode(img_byte_arr).decode('utf-8')
+                    logger.info(f"Successfully loaded and encoded image: {path_str}")
+            else:
+                logger.warning(f"Skipping image encoding as file does not exist: {path_str}")
+        except Exception as e:
+            logger.error(f"Error loading image {path_str}: {e}")
+        
+        return img_base64
+    
+    async def _get_adjacent_pages(self, path_str: str, metadata: Dict) -> List[Tuple[str, Dict]]:
+        """
+        Get paths to adjacent pages based on the current page.
+        
+        Args:
+            path_str: Path to the current page
+            metadata: Metadata for the current page
+            
+        Returns:
+            List of tuples containing path and metadata for adjacent pages
+        """
+        adjacent_pages = []
+        
+        try:
+            # Extract page number from the filename
+            # Format: '/Users/patrickcremin/repo/chat/data/pdfs/0/images/page_0001.png'
+            filename = os.path.basename(path_str)
+            
+            # Extract the page number using regex
+            page_match = re.search(r'page_(\d+)\.png', filename)
+            if page_match:
+                current_page = int(page_match.group(1))
+                logger.info(f"Extracted page number {current_page} from filename {filename}")
+                
+                # Get the directory path
+                directory = os.path.dirname(path_str)
+                
+                # Create paths for previous and next pages
+                for offset in [-1, 1]:  # -1 for previous page, 1 for next page
+                    adjacent_page = current_page + offset
+                    if adjacent_page > 0:  # Ensure page number is positive
+                        # Format the page number with leading zeros to match the pattern
+                        page_str = f"{adjacent_page:04d}"  # 4-digit with leading zeros
+                        adj_filename = f"page_{page_str}.png"
+                        adj_path = os.path.join(directory, adj_filename)
+                        
+                        # Check if the adjacent page file exists
+                        if os.path.exists(adj_path):
+                            # Create metadata for adjacent page
+                            adj_metadata = metadata.copy()
+                            adj_metadata['page'] = adjacent_page
+                            adj_metadata['is_adjacent'] = True
+                            adj_metadata['relation'] = 'previous' if offset == -1 else 'next'
+                            
+                            logger.info(f"Found {adj_metadata['relation']} page: {adj_path}")
+                            adjacent_pages.append((adj_path, adj_metadata))
+                        else:
+                            logger.info(f"Adjacent page file does not exist: {adj_path}")
+            else:
+                logger.warning(f"Could not extract page number from filename: {filename}")
+        except Exception as e:
+            logger.error(f"Error getting adjacent pages for {path_str}: {e}")
+        
+        return adjacent_pages
 
     async def retrieve(self, state: State) -> Dict[str, List[Document]]:
         """
-        Retrieve relevant documents for the query.
+        Retrieve relevant documents based on the query.
         
         Args:
-            state: The current state object
+            state: The current state containing the query.
             
         Returns:
-            Dictionary with retrieved documents
+            A dictionary with forum_docs and visual_docs.
         """
+        if not state.query:
+            raise ValueError("No query provided")
+        
+        # Create and send the retrieve step without ephemeral parameter
+        retrieve_step = cl.Step(name="Retrieve Documents", type="tool", show_input=True)
+        retrieve_step.input = f"Query: {state.query.query}, Topic: {state.query.topics}"
+        await retrieve_step.send()
+        
+        # Store the step in the state
+        state.steps["retrieve"] = retrieve_step
+        
+        # Update the retrieve step
+        retrieve_step.output = f"Retrieving documents for: {state.query.query}"
+        await retrieve_step.update()
+        
         try:
-            # Get the query from the state
-            query = state.query.query if state.query else state.question
-            if not query:
-                raise ValueError("No query provided")
+            # Get forum documents
+            forum_docs = await self._retrieve_forum_docs(state)
             
-            # Create and send the retrieve step without ephemeral parameter
-            retrieve_step = cl.Step(name="Retrieve Documents", type="tool", show_input=True)
-            retrieve_step.input = f"Query: {state.query.query}, Topic: {state.query.topics}"
-            await retrieve_step.send()
-            
-            # Store the step in the state
-            state.steps["retrieve"] = retrieve_step
-            
-            # Update the retrieve step
-            retrieve_step.output = f"Retrieving documents for: {state.query.query}"
-            await retrieve_step.update()
-
-            # Get documents from forum content
-            forum_docs = []
-            try:
-                # Search the forum content using the service
-                logger.info(f"Searching ChromaDB with query: '{query}', filter: {filter}")
-                forum_docs = await self.service_client.chroma_search(
-                    query=query,
-                    k=CONFIG.num_forum_results,
-                    filter={"topics": state.query.topics}
-                )
-                
-                logger.info(f"Retrieved {len(forum_docs)} documents from forum content")
-
-            except Exception as e:
-                logger.error(f"Error retrieving forum documents: {e}")
-            
-            # Get documents from visual search
-            visual_docs = []
-            visual_files = []
-            try:
-                # Use the service to search
-                results, paths = await self.service_client.visual_search(
-                    query=query,
-                    k=5
-                )
-                
-                # Convert paths to strings and store them
-                string_paths = [str(path) for path in paths]
-                
-                # Process each visual search result
-                for i, (result, path_str) in enumerate(zip(results, string_paths)):
-                    # Initialize variables
-                    full_path = ""
-                    img_base64 = None
-                    
-                    try:
-                        # Construct the full path by prepending CONFIG.data_dir / 'pdfs'
-                        full_path = str(CONFIG.data_dir / 'pdfs' / path_str)
-                        logger.info(f"Attempting to load image from: {full_path}")
-                        
-                        # Check if the file exists
-                        if not os.path.exists(full_path):
-                            logger.warning(f"File does not exist: {full_path}")
-                            # Try alternative paths
-                            alt_paths = [
-                                str(WORKSPACE_ROOT / 'data' / 'pdfs' / path_str),
-                                str(Path(path_str)),  # Try the path as-is
-                                str(Path('data') / 'pdfs' / path_str)
-                            ]
-                            
-                            # Try each alternative path
-                            for alt_path in alt_paths:
-                                logger.info(f"Trying alternative path: {alt_path}")
-                                if os.path.exists(alt_path):
-                                    full_path = alt_path
-                                    logger.info(f"Using alternative path: {full_path}")
-                                    break
-                            else:
-                                logger.warning(f"Could not find the image file in any of the tried paths")
-                        
-                        # Load and encode the image if the file exists
-                        if os.path.exists(full_path):
-                            with Image.open(full_path) as img:
-                                # Convert image to bytes
-                                img_byte_arr = BytesIO()
-                                img.save(img_byte_arr, format='PNG')
-                                img_byte_arr = img_byte_arr.getvalue()
-                                # Convert to base64
-                                img_base64 = base64.b64encode(img_byte_arr).decode('utf-8')
-                                logger.info(f"Successfully loaded and encoded image: {full_path}")
-                        else:
-                            logger.warning(f"Skipping image encoding as file does not exist: {full_path}")
-                    except Exception as e:
-                        logger.error(f"Error loading image {full_path}: {e}")
-                        img_base64 = None
-                    
-                    # Extract metadata from the result
-                    metadata = result.metadata if hasattr(result, 'metadata') else {}
-                    
-                    # Create a rich description of the image
-                    description = (
-                        f"Visual result from {path_str} with confidence score {result.score:.2f}.\n"
-                    )
-                    
-                    # Add additional metadata to the description if available
-                    if isinstance(metadata, dict):
-                        description += (
-                            f"This image shows {metadata.get('description', 'a sailing-related scene')}.\n"
-                        )
-                    
-                    # Create the document metadata
-                    doc_metadata = {
-                        "source": full_path,  # Use the full path in the metadata
-                        "score": result.score,
-                        "type": "visual",
-                        "doc_id": result.doc_id
-                    }
-                    
-                    # Add the base64 image to metadata if available
-                    if img_base64:
-                        doc_metadata['image_base64'] = img_base64
-                    
-                    # Add any additional metadata from the result
-                    if isinstance(metadata, dict):
-                        doc_metadata.update(metadata)
-                    
-                    # Create the document
-                    doc = Document(
-                        page_content=description,
-                        metadata=doc_metadata
-                    )
-                    
-                    visual_docs.append(doc)
-                
-                # Store the paths (use the full paths where possible)
-                visual_files = []
-                for path_str in string_paths:
-                    full_path = str(CONFIG.data_dir / 'pdfs' / path_str)
-                    if os.path.exists(full_path):
-                        visual_files.append(full_path)
-                    else:
-                        # Try alternative paths
-                        alt_path = str(WORKSPACE_ROOT / 'data' / 'pdfs' / path_str)
-                        if os.path.exists(alt_path):
-                            visual_files.append(alt_path)
-                        else:
-                            # Fall back to the original path
-                            visual_files.append(str(path_str))
-                
-                logger.info(f"Retrieved {len(visual_docs)} documents from visual search")
-            except Exception as e:
-                logger.error(f"Error retrieving visual documents: {e}")
-            
-            # Combine all documents
-            all_docs = forum_docs + visual_docs
-            
-            # Store the documents in the state
-            state.current_context = all_docs
-            state.visual_context = visual_docs
-            state.visual_files = visual_files
+            # Get visual documents
+            visual_docs = await self._retrieve_visual_docs(state)
             
             # Update step with the result
-            retrieve_step.output = f"Retrieved {len(all_docs)} documents"
+            retrieve_step.output = f"Retrieved {len(forum_docs) + len(visual_docs)} documents"
             await retrieve_step.update()
-                
-            # Mark the step as updated
+            
+             # Mark the step as updated
             if hasattr(state, 'updated_steps'):
                 state.updated_steps['retrieve'] = True
             
+            # TODO: Probably no reason to update the step and then just remove it
             await retrieve_step.remove()
             logger.info(f"Retrieve step removed")
-            
+
             return {
-                "current_context": all_docs,
-                "visual_context": visual_docs,
-                "visual_files": visual_files
+                "forum_docs": forum_docs,
+                "visual_docs": visual_docs,
             }
         except Exception as e:
-            logger.error(f"Error during retrieval: {e}")
-            raise RetrievalError(f"Failed to retrieve documents: {e}")
-
-    async def generate(self, state: State) -> Dict[str, str]:
+            logger.error(f"Error retrieving documents: {e}")
+            retrieve_step.error = str(e)
+            retrieve_step.status = "error"
+            raise RetrievalError(f"Error retrieving documents: {e}")
+    
+    async def _retrieve_forum_docs(self, state: State) -> List[Document]:
         """
-        Generate response using both current and running context.
+        Retrieve forum documents based on the query.
         
         Args:
-            state: The current state object
+            state: The current state containing the query.
             
         Returns:
-            Dictionary with the generated response and updated state
+            A list of forum documents.
         """
+        forum_docs = []
+        
+        # Search for documents in forum content
         try:
-            logger.info("Generating response from context")
-            logger.info(f"Initial state - current_context: {len(state.current_context)} docs, running_context: {len(state.running_context if state.running_context else [])} docs")
+            logger.info(f"Searching for forum documents with query: {state.query}")
             
-             # Create and send the generate step without ephemeral parameter
+            # Use the service client to search for documents
+            results = await self.service_client.chroma_search(
+                query=state.query.query,
+                filter={"topics": state.query.topics},
+            )
+            
+            if results:
+                logger.info(f"Found {len(results)} forum documents")
+                forum_docs = results
+            else:
+                logger.info("No forum documents found")
+        except Exception as e:
+            logger.error(f"Error searching for forum documents: {e}")
+            # Continue with empty forum_docs
+        
+        return forum_docs
+    
+    async def _retrieve_visual_docs(self, state: State) -> Tuple[List[Document], List[str]]:
+        """
+        Retrieve visual documents based on the query.
+        
+        Args:
+            state: The current state containing the query.
+            
+        Returns:
+            A tuple containing a list of visual documents and a list of visual file paths.
+        """
+        visual_docs = []
+        
+        # Search for visual documents
+        try:
+            logger.info(f"Searching for visual documents with query: {state.query}")
+            
+            # Use the service client to search for visual documents
+            results, paths = await self.service_client.visual_search(
+                query=state.query.query,
+                k=3,
+            )
+            # Update paths to include full data directory path
+            paths = [str(CONFIG.data_dir / 'pdfs' / path) for path in paths]
+
+            if results:
+                logger.info(f"Found {len(results)} visual documents")
+                
+                # Process each visual search result
+                for i, (result, path_str) in enumerate(zip(results, paths)):
+                    
+                    # Extract metadata from the result
+                    metadata = result.metadata or {}
+                    
+                    # Create base metadata for the main page
+                    main_metadata = {
+                        "type": "visual",
+                        "is_adjacent": False,  # This is the main page, not an adjacent one
+                    }
+                    
+                    # Add any additional metadata from the result to the main page
+                    if isinstance(metadata, dict):
+                        main_metadata.update(metadata)
+                    
+                    # Get all pages (main and adjacent)
+                    all_pages = [(path_str, main_metadata)]
+                    
+                    # Get adjacent pages and add them to the list
+                    adjacent_pages = await self._get_adjacent_pages(path_str, main_metadata)
+                    all_pages.extend(adjacent_pages)
+                    
+                    # Create document for each page
+                    for page_path, page_metadata in all_pages:
+                        # Load the image
+                        img_base64 = await self._load_image_from_path(page_path)
+                        
+                        # Only proceed if we successfully loaded the image
+                        if img_base64:
+                            # Create a description based on whether this is a main or adjacent page
+                            if page_metadata.get('is_adjacent', False):
+                                relation = page_metadata.get('relation', 'adjacent')
+                                page_num = page_metadata.get('page', 'unknown')
+                                
+                                description = (
+                                    f"{relation.capitalize()} page (page {page_num}) to the main result.\n"
+                                )
+                                
+                                # Add book info if available
+                                if 'book_title' in page_metadata:
+                                    description += f"Book: {page_metadata.get('book_title', 'Unknown')}\n"
+                            else:
+                                # Create a rich description for the main image
+                                description = f"Visual search result with confidence score: {page_metadata.get('score', 0.0):.2f}\n"
+                                
+                                # Add book info if available
+                                if 'book_title' in page_metadata:
+                                    description += f"Book: {page_metadata.get('book_title', 'Unknown')}"
+                                    if 'chapter' in page_metadata:
+                                        description += f", Chapter: {page_metadata.get('chapter', 'Unknown')}"
+                                    description += "\n"
+                                
+                                # Add page info if available
+                                if 'page' in page_metadata:
+                                    description += f"Page: {page_metadata.get('page', 'Unknown')}\n"
+                            
+                            # Add the source path to metadata
+                            page_metadata['source'] = path_str
+                            
+                            # Add the base64 image to metadata
+                            page_metadata['image_base64'] = img_base64
+                            
+                            # Create the document
+                            doc = Document(
+                                page_content=description,
+                                metadata=page_metadata
+                            )
+                            
+                            # Append to visual_docs
+                            visual_docs.append(doc)
+                            
+                            # Log the addition
+                            if page_metadata.get('is_adjacent', False):
+                                logger.info(f"Added {page_metadata.get('relation', 'adjacent')} page to visual_docs")
+                            else:
+                                logger.info(f"Added main visual result to visual_docs")
+                        else:
+                            logger.warning(f"Could not load image for path: {page_path}")
+                
+               
+                    
+            else:
+                logger.info("No visual documents found")
+        except Exception as e:
+            logger.error(f"Error searching for visual documents: {e}")
+            
+        
+        return visual_docs
+
+    async def generate(self, state: State) -> Dict[str, str]:
+        """Generate response using both current and running context."""
+        try:
+            logger.info("Generating response from context")            
+            
+            # Create and send the generate step without ephemeral parameter
             generate_step = cl.Step(name="Generate Response", type="run", show_input=False)
             await generate_step.send()
             
@@ -414,20 +563,8 @@ class Retriever:
             generate_step.output = "Generating response from retrieved documents..."
             await generate_step.update()
             
-            # Remove docs from running context that are in current context
-            current_ids = {getattr(doc, 'id', i) for i, doc in enumerate(state.current_context)}
-            filtered_running_docs = []
-            if state.running_context:
-                filtered_running_docs = [
-                    doc for i, doc in enumerate(state.running_context) 
-                    if getattr(doc, 'id', i) not in current_ids
-                ]
-            
-            # Add current docs at front, running docs at back
-            combined_docs = state.current_context + filtered_running_docs
-            
-            # Trim to window size
-            combined_docs = combined_docs[:CONFIG.doc_window_size]
+            # Get document IDs from current context
+            # current_ids = {getattr(doc, 'id', i) for i, doc in enumerate(state.current_context)}
             
             # Trim chat history if needed
             chat_history = state.chat_history if state.chat_history else []
@@ -439,35 +576,20 @@ class Retriever:
                 f"{msg['role'].capitalize()}: {msg['content']}" 
                 for msg in chat_history
             ])
-            
-            # Generate text content from documents
-            docs_content = "\n\n".join(doc.page_content for doc in combined_docs)
-            
-            # Create a list to hold message content (text + images)
+
+            # Prepare content
+            docs_content = await self._prepare_forum_content(state)                        
+            visual_content = await self._prepare_visual_message_items(state)
+
+            # Create the base message content with the user's question
+            # Visual conent must go here because of how the LLM works
             user_message_content = [
-                # First add the text content
                 {"type": "text", "text": state.question}
             ]
             
             # Add visual content if available
-            if state.visual_context:
-                # Add a text description of the visual content
-                visual_descriptions = "\n\n".join(
-                    f"Image {i+1} description: {doc.page_content}" 
-                    for i, doc in enumerate(state.visual_context)
-                )
-                user_message_content.append({"type": "text", "text": visual_descriptions})
-                
-                # Add each image as a separate content item in the proper format
-                for i, doc in enumerate(state.visual_context):
-                    if img_base64 := doc.metadata.get('image_base64'):
-                        # Format as data URL with proper MIME type
-                        user_message_content.append({
-                            "type": "image_url",
-                            "image_url": {
-                                "url": f"data:image/png;base64,{img_base64}"
-                            }
-                        })
+            if visual_content:
+                user_message_content.extend(visual_content)
             
             # Create a modified prompt template that can handle multimodal content
             multimodal_prompt = ChatPromptTemplate.from_messages([
@@ -519,10 +641,8 @@ class Retriever:
             
             return {
                 "answer": response_content,
-                "running_context": combined_docs,
                 "chat_history": chat_history,
                 "visual_context": state.visual_context,
-                "visual_files": state.visual_files
             }
         
         except Exception as e:
