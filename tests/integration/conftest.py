@@ -19,13 +19,13 @@ if project_root not in sys.path:
     sys.path.append(project_root)
 
 # Import the service client
-from services.client import ServiceClient
+from services.corpus_service import CorpusClient
 
 # Fixture for the service client
 @pytest_asyncio.fixture
 async def client():
     """Create a service client for testing."""
-    client = ServiceClient()
+    client = CorpusClient()
     try:
         yield client
     finally:

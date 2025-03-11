@@ -23,7 +23,7 @@ if project_root not in sys.path:
     sys.path.append(project_root)
 
 # Import the service app
-from services.service import app
+from services.corpus_service.service import app
 
 # Create a test client
 client = TestClient(app)

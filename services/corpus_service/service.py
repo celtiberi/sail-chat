@@ -344,4 +344,4 @@ if __name__ == "__main__":
     
     # Run the service
     logger.info(f"Starting service on port {port}")
-    uvicorn.run("service:app", host="0.0.0.0", port=port) 
+    uvicorn.run("corpus_service.service:app", host="0.0.0.0", port=port, app_dir="services") 

@@ -28,12 +28,13 @@ class SearchResult(BaseModel):
     score: float
     metadata: Dict[str, Any] = {}
 
-class ServiceClient:
+class CorpusClient:
     """
-    Client for the Combined Service.
+    Client for the Knowledge Corpus Service.
     
     This client provides methods to interact with the combined service
-    for visual search and ChromaDB.
+    for visual search and ChromaDB to retrieve information from the corpus
+    of sailing and boating knowledge from various sources.
     """
     
     def __init__(self, base_url: str = None):
@@ -44,7 +45,7 @@ class ServiceClient:
             base_url: The base URL of the service
         """
         self.base_url = base_url or os.getenv("SERVICES_URL", "http://localhost:8081")
-        logger.info(f"Initializing ServiceClient with base URL: {self.base_url}")
+        logger.info(f"Initializing CorpusClient with base URL: {self.base_url}")
         self.client = None
     
     async def _get_client(self):

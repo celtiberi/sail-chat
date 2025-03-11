@@ -11,7 +11,7 @@ import json
 from pathlib import Path
 
 # Import the service client
-from services.client import ServiceClient
+from services.corpus_service import CorpusClient
 
 @pytest.mark.asyncio
 async def test_health_check(client):

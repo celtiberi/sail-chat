@@ -24,7 +24,7 @@ if project_root not in sys.path:
     sys.path.append(project_root)
 
 # Import the service client
-from services.client import ServiceClient
+from services.corpus_service import CorpusClient
 
 # Import the config
 from src.config import RETRIEVER_CONFIG as CONFIG
@@ -198,7 +198,7 @@ async def test_service_client():
     services_url = os.getenv("SERVICES_URL", "http://localhost:8081")
     
     # Create the service client
-    client = ServiceClient(services_url)
+    client = CorpusClient(services_url)
     
     # Test the health check
     try:

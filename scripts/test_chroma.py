@@ -135,14 +135,14 @@ async def check_service_client():
     logger.info("Testing service client")
     
     # Import the service client
-    from services.client import ServiceClient
+    from services.corpus_service import CorpusClient
     
     # Get the services URL from environment or use default
     services_url = os.getenv("SERVICES_URL", "http://localhost:8081")
     logger.info(f"Services URL: {services_url}")
     
     # Create the service client
-    client = ServiceClient(services_url)
+    client = CorpusClient(services_url)
     
     # Test the health check
     try:

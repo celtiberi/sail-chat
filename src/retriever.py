@@ -8,7 +8,7 @@ from langchain_core.vectorstores import VectorStore
 import logging
 from dataclasses import dataclass
 from models import ForumTopic, State, Search
-from services.client import ServiceClient
+from services.corpus_service import CorpusClient
 from PIL import Image
 from io import BytesIO
 import base64
@@ -115,8 +115,8 @@ class Retriever:
         
         # Initialize the service client
         services_url = os.getenv("SERVICES_URL", "http://localhost:8081")
-        self.service_client = ServiceClient(services_url)
-        logger.info(f"Initialized ServiceClient with URL: {services_url}")
+        self.corpus_client = CorpusClient(services_url)
+        logger.info(f"Initialized CorpusClient with URL: {services_url}")
         
         # Create query analysis prompt
         self.query_prompt = ChatPromptTemplate.from_messages([
@@ -478,7 +478,7 @@ class Retriever:
             logger.info(f"Searching for forum documents with query: {state.query}")
             
             # Use the service client to search for documents
-            results = await self.service_client.chroma_search(
+            results = await self.corpus_client.chroma_search(
                 query=state.query.query,
                 filter={"topics": state.query.topics},
             )
@@ -511,7 +511,7 @@ class Retriever:
             logger.info(f"Searching for visual documents with query: {state.query}")
             
             # Use the service client to search for visual documents
-            results, paths = await self.service_client.visual_search(
+            results, paths = await self.corpus_client.visual_search(
                 query=state.query.query,
                 k=3,
             )
@@ -704,8 +704,7 @@ class Retriever:
             
             return {
                 "answer": response_content,
-                "chat_history": chat_history,
-                "visual_context": state.visual_context,
+                "chat_history": chat_history
             }
         
         except Exception as e:
@@ -721,7 +720,7 @@ class Retriever:
             True if the service is healthy, False otherwise
         """
         try:
-            is_healthy = await self.service_client.health_check()
+            is_healthy = await self.corpus_client.health_check()
             if is_healthy:
                 logger.info("Service is healthy")
             else:
