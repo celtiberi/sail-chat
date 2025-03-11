@@ -231,21 +231,85 @@ class Retriever:
         
         # Add visual content if available
         if state.visual_docs:
-            # Add a text description of the visual content
-            visual_descriptions = "\n\n".join(
-                f"Image {i+1} description: {doc.page_content}" 
-                for i, doc in enumerate(state.visual_docs)
-            )
-            visual_content.append({"type": "text", "text": visual_descriptions})
+            # Group documents by their main result (using doc_id)
+            page_groups = {}
+            
+            # First, identify main pages and create groups
+            for doc in state.visual_docs:
+                if not doc.metadata.get('is_adjacent', False):
+                    doc_id = doc.metadata.get('doc_id')
+                    if doc_id:
+                        # Create a new group with the main page
+                        page_groups[doc_id] = {
+                            'main': doc,
+                            'adjacent': []
+                        }
+            
+            # Then, add adjacent pages to their respective groups
+            for doc in state.visual_docs:
+                if doc.metadata.get('is_adjacent', False):
+                    # Find the main page this is adjacent to
+                    main_doc_id = doc.metadata.get('doc_id')
+                    if main_doc_id and main_doc_id in page_groups:
+                        page_groups[main_doc_id]['adjacent'].append(doc)
+            
+            # Create a structured description of the visual content
+            visual_descriptions = []
+            
+            for group_id, group in page_groups.items():
+                main_doc = group['main']
+                adjacent_docs = group['adjacent']
+                
+                # Get book and page info
+                book_title = main_doc.metadata.get('pdf_title', 'Unknown document')
+                main_page = main_doc.metadata.get('page_num', 'unknown')
+                
+                # Start with the main page description
+                group_desc = f"Document: {book_title}\n"
+                group_desc += f"Main result - Page {main_page}: {main_doc.page_content}\n"
+                
+                # Add adjacent pages in order
+                if adjacent_docs:
+                    # Sort adjacent pages by page number
+                    adjacent_docs.sort(key=lambda doc: int(doc.metadata.get('page_num', 0)))
+                    
+                    # List the page sequence
+                    page_numbers = [main_page] + [doc.metadata.get('page_num', 'unknown') for doc in adjacent_docs]
+                    
+                    # Convert to integers and sort
+                    sorted_page_numbers = [int(p) for p in page_numbers]
+                    sorted_page_numbers.sort()
+                    
+                    group_desc += f"This result includes a sequence of pages: {', '.join(str(p) for p in sorted_page_numbers)}\n"
+                    
+                    # Add each adjacent page description
+                    for adj_doc in adjacent_docs:
+                        relation = adj_doc.metadata.get('relation', 'adjacent')
+                        page = adj_doc.metadata.get('page_num', 'unknown')
+                        group_desc += f"{relation.capitalize()} page {page}: {adj_doc.page_content}\n"
+                
+                visual_descriptions.append(group_desc)
+            
+            # Join all group descriptions
+            all_descriptions = "\n\n".join(visual_descriptions)
+            visual_content.append({"type": "text", "text": all_descriptions})
             
             # Add each image as a separate content item in the proper format
-            for i, doc in enumerate(state.visual_docs):
+            for doc in state.visual_docs:
                 if img_base64 := doc.metadata.get('image_base64'):
+                    # Add page info to help identify the image
+                    page_info = f"Page {doc.metadata.get('page', 'unknown')}"
+                    if doc.metadata.get('is_adjacent', False):
+                        page_info += f" ({doc.metadata.get('relation', 'adjacent')})"
+                    
                     # Format as data URL with proper MIME type
                     visual_content.append({
                         "type": "image_url",
                         "image_url": {
                             "url": f"data:image/png;base64,{img_base64}"
+                        },
+                        "metadata": {
+                            "page_info": page_info
                         }
                     })
         
@@ -328,7 +392,7 @@ class Retriever:
                         if os.path.exists(adj_path):
                             # Create metadata for adjacent page
                             adj_metadata = metadata.copy()
-                            adj_metadata['page'] = adjacent_page
+                            adj_metadata['page_num'] = adjacent_page
                             adj_metadata['is_adjacent'] = True
                             adj_metadata['relation'] = 'previous' if offset == -1 else 'next'
                             
@@ -466,6 +530,8 @@ class Retriever:
                     # Create base metadata for the main page
                     main_metadata = {
                         "type": "visual",
+                        "doc_id": result.doc_id,
+                        "score": result.score,
                         "is_adjacent": False,  # This is the main page, not an adjacent one
                     }
                     
@@ -490,29 +556,26 @@ class Retriever:
                             # Create a description based on whether this is a main or adjacent page
                             if page_metadata.get('is_adjacent', False):
                                 relation = page_metadata.get('relation', 'adjacent')
-                                page_num = page_metadata.get('page', 'unknown')
+                                page_num = page_metadata.get('page_num', 'unknown')
                                 
                                 description = (
                                     f"{relation.capitalize()} page (page {page_num}) to the main result.\n"
                                 )
                                 
                                 # Add book info if available
-                                if 'book_title' in page_metadata:
-                                    description += f"Book: {page_metadata.get('book_title', 'Unknown')}\n"
+                                if 'pdf_title' in page_metadata:
+                                    description += f"Book: {page_metadata.get('pdf_title', 'Unknown')}\n"
                             else:
                                 # Create a rich description for the main image
                                 description = f"Visual search result with confidence score: {page_metadata.get('score', 0.0):.2f}\n"
                                 
                                 # Add book info if available
-                                if 'book_title' in page_metadata:
-                                    description += f"Book: {page_metadata.get('book_title', 'Unknown')}"
-                                    if 'chapter' in page_metadata:
-                                        description += f", Chapter: {page_metadata.get('chapter', 'Unknown')}"
-                                    description += "\n"
+                                if 'pdf_title' in page_metadata:
+                                    description += f"Book: {page_metadata.get('pdf_title', 'Unknown')}\n"                                   
                                 
                                 # Add page info if available
-                                if 'page' in page_metadata:
-                                    description += f"Page: {page_metadata.get('page', 'Unknown')}\n"
+                                if 'page_num' in page_metadata:
+                                    description += f"Page: {page_metadata.get('page_num', 'Unknown')}\n"
                             
                             # Add the source path to metadata
                             page_metadata['source'] = path_str
