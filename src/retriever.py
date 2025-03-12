@@ -261,15 +261,16 @@ class Retriever:
         
         return visual_content
 
-    async def _load_image_from_path(self, path_str: str) -> Tuple[str, Optional[str]]:
+    async def _load_image_from_path(self, path_str: str, max_size: int = 512) -> str:
         """
-        Load and encode an image from a path.
+        Load, resize, and encode an image from a path.
         
         Args:
             path_str: Path to the image file
+            max_size: Maximum width or height of the image in pixels (default: 512)
             
         Returns:
-            Tuple containing the full path and base64-encoded image (or None if loading failed)
+            Base64-encoded image string or None if loading failed
         """
         img_base64 = None
         
@@ -281,15 +282,49 @@ class Retriever:
                 logger.warning(f"File does not exist: {path_str}")
                 return None
                 
+            # Get original file size
+            original_file_size = os.path.getsize(path_str)
+            original_file_size_mb = original_file_size / (1024 * 1024)
+            logger.info(f"Original file size: {original_file_size_mb:.2f} MB ({original_file_size} bytes)")
+            
             # Load and encode the image if the file exists
             if os.path.exists(path_str):
                 with Image.open(path_str) as img:
-                    # Convert image to bytes
+                    # Resize the image while maintaining aspect ratio
+                    width, height = img.size
+                    original_dimensions = f"{width}x{height}"
+                    
+                    if width > max_size or height > max_size:
+                        # Calculate the scaling factor
+                        scale_factor = max_size / max(width, height)
+                        new_width = int(width * scale_factor)
+                        new_height = int(height * scale_factor)
+                        
+                        # Resize the image
+                        img = img.resize((new_width, new_height), Image.LANCZOS)
+                        logger.info(f"Resized image from {original_dimensions} to {new_width}x{new_height}")
+                    else:
+                        logger.info(f"Image dimensions {original_dimensions} are within limits, no resizing needed")
+                    
+                    # Convert image to bytes with optimization for PNG
                     img_byte_arr = BytesIO()
-                    img.save(img_byte_arr, format='PNG')
-                    img_byte_arr = img_byte_arr.getvalue()
+                    img.save(img_byte_arr, format='PNG', optimize=True, compress_level=6)
+                    img_byte_arr_value = img_byte_arr.getvalue()
+                    
+                    # Calculate compressed size
+                    compressed_size = len(img_byte_arr_value)
+                    compressed_size_mb = compressed_size / (1024 * 1024)
+                    
+                    # Calculate reduction percentage
+                    reduction_percentage = ((original_file_size - compressed_size) / original_file_size) * 100
+                    
+                    logger.info(f"Compressed file size: {compressed_size_mb:.2f} MB ({compressed_size} bytes)")
+                    logger.info(f"Size reduction: {reduction_percentage:.1f}% ({(original_file_size - compressed_size) / (1024 * 1024):.2f} MB saved)")
+                    
                     # Convert to base64
-                    img_base64 = base64.b64encode(img_byte_arr).decode('utf-8')
+                    img_base64 = base64.b64encode(img_byte_arr_value).decode('utf-8')
+                    base64_size_mb = len(img_base64) / (1024 * 1024)
+                    logger.info(f"Base64 encoded size: {base64_size_mb:.2f} MB")
                     logger.info(f"Successfully loaded and encoded image: {path_str}")
             else:
                 logger.warning(f"Skipping image encoding as file does not exist: {path_str}")
@@ -353,12 +388,14 @@ class Retriever:
         
         return adjacent_pages
 
-    async def retrieve(self, state: State) -> Dict[str, List[Document]]:
+    async def retrieve(self, state: State, include_adjacent_pages: bool = True, max_image_size: int = 800) -> Dict[str, List[Document]]:
         """
         Retrieve relevant documents based on the query.
         
         Args:
             state: The current state containing the query.
+            include_adjacent_pages: Whether to include adjacent pages in visual results (default: True)
+            max_image_size: Maximum width or height of the images in pixels (default: 800)
             
         Returns:
             A dictionary with forum_docs and visual_docs.
@@ -372,7 +409,11 @@ class Retriever:
                 forum_docs = await self._retrieve_forum_docs(state)
                 
                 # Get visual documents
-                visual_docs = await self._retrieve_visual_docs(state, include_adjacent_pages=False)
+                visual_docs = await self._retrieve_visual_docs(
+                    state, 
+                    include_adjacent_pages=include_adjacent_pages,
+                    max_image_size=max_image_size
+                )
             
                 # Update step with the result
                 retrieve_step.output = f"Retrieved {len(forum_docs) + len(visual_docs)} documents"
@@ -425,16 +466,17 @@ class Retriever:
         
         return forum_docs
     
-    async def _retrieve_visual_docs(self, state: State, include_adjacent_pages: bool = True) -> Tuple[List[Document], List[str]]:
+    async def _retrieve_visual_docs(self, state: State, include_adjacent_pages: bool = True, max_image_size: int = 800) -> List[Document]:
         """
         Retrieve visual documents based on the query.
         
         Args:
             state: The current state containing the query.
             include_adjacent_pages: Whether to include adjacent pages in the results (default: True)
+            max_image_size: Maximum width or height of the images in pixels (default: 800)
             
         Returns:
-            A tuple containing a list of visual documents and a list of visual file paths.
+            A list of visual documents.
         """
         visual_docs = []
         
@@ -481,8 +523,8 @@ class Retriever:
                     
                     # Create document for each page
                     for page_path, page_metadata in all_pages:
-                        # Load the image
-                        img_base64 = await self._load_image_from_path(page_path)
+                        # Load the image with the specified max size
+                        img_base64 = await self._load_image_from_path(page_path, max_size=max_image_size)
                         
                         # Only proceed if we successfully loaded the image
                         if img_base64:
