@@ -4,7 +4,7 @@ console.log('nautical.js loading... v1.1.0'); // Added version number for tracki
 // Cache-busting mechanism
 (function() {
     // Check if this is a new version that needs cache busting
-    const currentVersion = '1.1.0';
+    const currentVersion = '1.1.1';
     const storedVersion = localStorage.getItem('nauticalVersion');
     
     if (storedVersion !== currentVersion) {
