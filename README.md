@@ -63,11 +63,11 @@ cp .env.example .env
 
 ### Starting the Application
 
-Start the Combined Services:
+Start the Corpus Service:
 
 ```bash
-# Start the Combined Services
-python scripts/start_services.py
+# Start the Corpus Service
+python service/run_corpus_service.py
 ```
 
 Then, in a separate terminal, start the main application:
@@ -78,7 +78,7 @@ python src/main.py
 ```
 
 The Combined Services will be available at http://localhost:8081
-The main application will be available at http://localhost:8080
+The main application will be available at http://localhost:4001
 
 ### Example Queries
 

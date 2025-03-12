@@ -99,7 +99,6 @@ document.addEventListener('DOMContentLoaded', function() {
         <p>Here's how to get the most out of your sailing companion:</p>
         <ul style="padding-left: 20px; margin-bottom: 10px;">
             <li>Ask specific questions about sailing techniques, navigation, or boat and engine maintenance</li>            
-            <li>For route planning, include details about your vessel and intended destination</li>
         </ul>
         <div style="display: flex; flex-direction: column; gap: 10px;">
             <span>Example: "What safety equipment should I have for coastal sailing in the Pacific Northwest?"</span>
