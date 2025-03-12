@@ -177,76 +177,28 @@ class Retriever:
         
         # Add visual content if available
         if state.visual_docs:
-            # Group documents by their main result (using doc_id)
-            page_groups = {}
-            
-            # First, identify main pages and create groups
-            for doc in state.visual_docs:
-                if not doc.metadata.get('is_adjacent', False):
-                    doc_id = doc.metadata.get('doc_id')
-                    if doc_id:
-                        # Create a new group with the main page
-                        page_groups[doc_id] = {
-                            'main': doc,
-                            'adjacent': []
-                        }
-            
-            # Then, add adjacent pages to their respective groups
-            for doc in state.visual_docs:
-                if doc.metadata.get('is_adjacent', False):
-                    # Find the main page this is adjacent to
-                    main_doc_id = doc.metadata.get('doc_id')
-                    if main_doc_id and main_doc_id in page_groups:
-                        page_groups[main_doc_id]['adjacent'].append(doc)
-            
             # Create a structured description of the visual content
             visual_descriptions = []
             
-            for group_id, group in page_groups.items():
-                main_doc = group['main']
-                adjacent_docs = group['adjacent']
-                
+            for doc in state.visual_docs:
                 # Get book and page info
-                book_title = main_doc.metadata.get('pdf_title', 'Unknown document')
-                main_page = main_doc.metadata.get('page_num', 'unknown')
+                book_title = doc.metadata.get('pdf_title', 'Unknown document')
+                page_num = doc.metadata.get('page_num', 'unknown')
                 
-                # Start with the main page description
-                group_desc = f"Document: {book_title}\n"
-                group_desc += f"Main result - Page {main_page}: {main_doc.page_content}\n"
-                
-                # Add adjacent pages in order
-                if adjacent_docs:
-                    # Sort adjacent pages by page number
-                    adjacent_docs.sort(key=lambda doc: int(doc.metadata.get('page_num', 0)))
-                    
-                    # List the page sequence
-                    page_numbers = [main_page] + [doc.metadata.get('page_num', 'unknown') for doc in adjacent_docs]
-                    
-                    # Convert to integers and sort
-                    sorted_page_numbers = [int(p) for p in page_numbers]
-                    sorted_page_numbers.sort()
-                    
-                    group_desc += f"This result includes a sequence of pages: {', '.join(str(p) for p in sorted_page_numbers)}\n"
-                    
-                    # Add each adjacent page description
-                    for adj_doc in adjacent_docs:
-                        relation = adj_doc.metadata.get('relation', 'adjacent')
-                        page = adj_doc.metadata.get('page_num', 'unknown')
-                        group_desc += f"{relation.capitalize()} page {page}: {adj_doc.page_content}\n"
-                
-                visual_descriptions.append(group_desc)
+                # Create the description
+                desc = f"Document: {book_title}\n"
+                desc += f"Page {page_num}: {doc.page_content}\n"
+                visual_descriptions.append(desc)
             
-            # Join all group descriptions
+            # Join all descriptions
             all_descriptions = "\n\n".join(visual_descriptions)
             visual_content.append({"type": "text", "text": all_descriptions})
             
-            # Add each image as a separate content item in the proper format
+            # Add each image
             for doc in state.visual_docs:
                 if img_base64 := doc.metadata.get('image_base64'):
                     # Add page info to help identify the image
-                    page_info = f"Page {doc.metadata.get('page', 'unknown')}"
-                    if doc.metadata.get('is_adjacent', False):
-                        page_info += f" ({doc.metadata.get('relation', 'adjacent')})"
+                    page_info = f"Page {doc.metadata.get('page_num', 'unknown')}"
                     
                     # Format as data URL with proper MIME type
                     visual_content.append({
@@ -261,13 +213,12 @@ class Retriever:
         
         return visual_content
 
-    async def _load_image_from_path(self, path_str: str, max_size: int = 512) -> str:
+    async def _load_image_from_path(self, path_str: str) -> str:
         """
         Load, resize, and encode an image from a path.
         
         Args:
             path_str: Path to the image file
-            max_size: Maximum width or height of the image in pixels (default: 512)
             
         Returns:
             Base64-encoded image string or None if loading failed
@@ -294,9 +245,9 @@ class Retriever:
                     width, height = img.size
                     original_dimensions = f"{width}x{height}"
                     
-                    if width > max_size or height > max_size:
+                    if width > CONFIG.max_image_size or height > CONFIG.max_image_size:
                         # Calculate the scaling factor
-                        scale_factor = max_size / max(width, height)
+                        scale_factor = CONFIG.max_image_size / max(width, height)
                         new_width = int(width * scale_factor)
                         new_height = int(height * scale_factor)
                         
@@ -333,154 +284,18 @@ class Retriever:
         
         return img_base64
     
-    async def _get_adjacent_pages(self, path_str: str, metadata: Dict) -> List[Tuple[str, Dict]]:
-        """
-        Get paths to adjacent pages based on the current page.
-        
-        Args:
-            path_str: Path to the current page
-            metadata: Metadata for the current page
-            
-        Returns:
-            List of tuples containing path and metadata for adjacent pages
-        """
-        adjacent_pages = []
-        
-        try:
-            # Extract page number from the filename
-            # Format: '/Users/patrickcremin/repo/chat/data/pdfs/0/images/page_0001.png'
-            filename = os.path.basename(path_str)
-            
-            # Extract the page number using regex
-            page_match = re.search(r'page_(\d+)\.png', filename)
-            if page_match:
-                current_page = int(page_match.group(1))
-                logger.info(f"Extracted page number {current_page} from filename {filename}")
-                
-                # Get the directory path
-                directory = os.path.dirname(path_str)
-                
-                # Create paths for previous and next pages
-                for offset in [-1, 1]:  # -1 for previous page, 1 for next page
-                    adjacent_page = current_page + offset
-                    if adjacent_page > 0:  # Ensure page number is positive
-                        # Format the page number with leading zeros to match the pattern
-                        page_str = f"{adjacent_page:04d}"  # 4-digit with leading zeros
-                        adj_filename = f"page_{page_str}.png"
-                        adj_path = os.path.join(directory, adj_filename)
-                        
-                        # Check if the adjacent page file exists
-                        if os.path.exists(adj_path):
-                            # Create metadata for adjacent page
-                            adj_metadata = metadata.copy()
-                            adj_metadata['page_num'] = adjacent_page
-                            adj_metadata['is_adjacent'] = True
-                            adj_metadata['relation'] = 'previous' if offset == -1 else 'next'
-                            
-                            logger.info(f"Found {adj_metadata['relation']} page: {adj_path}")
-                            adjacent_pages.append((adj_path, adj_metadata))
-                        else:
-                            logger.info(f"Adjacent page file does not exist: {adj_path}")
-            else:
-                logger.warning(f"Could not extract page number from filename: {filename}")
-        except Exception as e:
-            logger.error(f"Error getting adjacent pages for {path_str}: {e}")
-        
-        return adjacent_pages
-
-    async def retrieve(self, state: State, max_image_size: int = 800) -> Dict[str, List[Document]]:
-        """
-        Retrieve relevant documents based on the query.
-        
-        Args:
-            state: The current state containing the query.
-            include_adjacent_pages: Whether to include adjacent pages in visual results (default: True)
-            max_image_size: Maximum width or height of the images in pixels (default: 800)
-            
-        Returns:
-            A dictionary with forum_docs and visual_docs.
-        """
-        if not state.query:
-            raise ValueError("No query provided")
-        
-        try:
-            with cl.Step(name="Load Data", type="tool") as retrieve_step:
-                # Get forum documents
-                forum_docs = await self._retrieve_forum_docs(state)
-                
-                # Get visual documents
-                visual_docs = await self._retrieve_visual_docs(
-                    state, 
-                    include_adjacent_pages=False,
-                    max_image_size=max_image_size
-                )
-            
-                # Update step with the result
-                retrieve_step.output = f"Retrieved {len(forum_docs) + len(visual_docs)} documents"
-                await retrieve_step.update()
-            
-            # await retrieve_step.remove()
-            # logger.info(f"Retrieve step removed")
-
-            return {
-                "forum_docs": forum_docs,
-                "visual_docs": visual_docs,
-            }
-        except Exception as e:
-            logger.error(f"Error retrieving documents: {e}")
-            retrieve_step.error = str(e)
-            retrieve_step.status = "error"
-            raise RetrievalError(f"Error retrieving documents: {e}")
-    
-    async def _retrieve_forum_docs(self, state: State) -> List[Document]:
-        """
-        Retrieve forum documents based on the query.
-        
-        Args:
-            state: The current state containing the query.
-            
-        Returns:
-            A list of forum documents.
-        """
-        forum_docs = []
-        
-        # Search for documents in forum content
-        try:
-            logger.info(f"Searching for forum documents with query: {state.query}")
-            
-            # Use the service client to search for documents
-            results = await self.corpus_client.chroma_search(
-                query=state.query.query,
-                k=CONFIG.corpus_chroma_search_k,
-                filter={"topics": state.query.topics},
-            )
-            
-            if results:
-                logger.info(f"Found {len(results)} forum documents")
-                forum_docs = results
-            else:
-                logger.info("No forum documents found")
-        except Exception as e:
-            logger.error(f"Error searching for forum documents: {e}")
-            # Continue with empty forum_docs
-        
-        return forum_docs
-    
-    async def _retrieve_visual_docs(self, state: State, include_adjacent_pages: bool = True, max_image_size: int = 800) -> List[Document]:
+    async def _retrieve_visual_docs(self, state: State) -> List[Document]:
         """
         Retrieve visual documents based on the query.
         
         Args:
             state: The current state containing the query.
-            include_adjacent_pages: Whether to include adjacent pages in the results (default: True)
-            max_image_size: Maximum width or height of the images in pixels (default: 800)
             
         Returns:
             A list of visual documents.
         """
         visual_docs = []
         
-        # Search for visual documents
         try:
             logger.info(f"Searching for visual documents with query: {state.query}")
             
@@ -492,96 +307,93 @@ class Retriever:
             # Update paths to include full data directory path
             paths = [str(CONFIG.data_dir / 'pdfs' / path) for path in paths]
 
-            if results:
-                logger.info(f"Found {len(results)} visual documents")
-                
-                # Process each visual search result
-                for i, (result, path_str) in enumerate(zip(results, paths)):
-                    
-                    # Extract metadata from the result
-                    metadata = result.metadata or {}
-                    
-                    # Create base metadata for the main page
-                    main_metadata = {
-                        "type": "visual",
-                        "doc_id": result.doc_id,
-                        "score": result.score,
-                        "is_adjacent": False,  # This is the main page, not an adjacent one
-                    }
-                    
-                    # Add any additional metadata from the result to the main page
-                    if isinstance(metadata, dict):
-                        main_metadata.update(metadata)
-                    
-                    # Get all pages (main and adjacent)
-                    all_pages = [(path_str, main_metadata)]
-                    
-                    # Get adjacent pages and add them to the list if requested
-                    if include_adjacent_pages:
-                        adjacent_pages = await self._get_adjacent_pages(path_str, main_metadata)
-                        all_pages.extend(adjacent_pages)
-                    
-                    # Create document for each page
-                    for page_path, page_metadata in all_pages:
-                        # Load the image with the specified max size
-                        img_base64 = await self._load_image_from_path(page_path, max_size=max_image_size)
-                        
-                        # Only proceed if we successfully loaded the image
-                        if img_base64:
-                            # Create a description based on whether this is a main or adjacent page
-                            if page_metadata.get('is_adjacent', False):
-                                relation = page_metadata.get('relation', 'adjacent')
-                                page_num = page_metadata.get('page_num', 'unknown')
-                                
-                                description = (
-                                    f"{relation.capitalize()} page (page {page_num}) to the main result.\n"
-                                )
-                                
-                                # Add book info if available
-                                if 'pdf_title' in page_metadata:
-                                    description += f"Book: {page_metadata.get('pdf_title', 'Unknown')}\n"
-                            else:
-                                # Create a rich description for the main image
-                                description = f"Visual search result with confidence score: {page_metadata.get('score', 0.0):.2f}\n"
-                                
-                                # Add book info if available
-                                if 'pdf_title' in page_metadata:
-                                    description += f"Book: {page_metadata.get('pdf_title', 'Unknown')}\n"                                   
-                                
-                                # Add page info if available
-                                if 'page_num' in page_metadata:
-                                    description += f"Page: {page_metadata.get('page_num', 'Unknown')}\n"
-                            
-                            # Add the source path to metadata
-                            page_metadata['source'] = path_str
-                            
-                            # Add the base64 image to metadata
-                            page_metadata['image_base64'] = img_base64
-                            
-                            # Create the document
-                            doc = Document(
-                                page_content=description,
-                                metadata=page_metadata
-                            )
-                            
-                            # Append to visual_docs
-                            visual_docs.append(doc)
-                            
-                            # Log the addition
-                            if page_metadata.get('is_adjacent', False):
-                                logger.info(f"Added {page_metadata.get('relation', 'adjacent')} page to visual_docs")
-                            else:
-                                logger.info(f"Added main visual result to visual_docs")
-                        else:
-                            logger.warning(f"Could not load image for path: {page_path}")
-                
-            else:
+            if not results:
                 logger.info("No visual documents found")
+                return visual_docs
+
+            logger.info(f"Found {len(results)} visual documents")
+            
+            # Prepare all tasks for parallel processing
+            processing_tasks = []
+            
+            for i, (result, path_str) in enumerate(zip(results, paths)):
+                # Extract metadata from the result
+                metadata = result.metadata or {}
+                
+                # Create base metadata for the main page
+                main_metadata = {
+                    "type": "visual",
+                    "doc_id": result.doc_id,
+                    "score": result.score,
+                }
+                
+                # Add any additional metadata from the result
+                if isinstance(metadata, dict):
+                    main_metadata.update(metadata)
+                
+                # Create task for processing the page
+                task = self._process_single_page(path_str, main_metadata)
+                processing_tasks.append(task)
+            
+            # Process all pages in parallel
+            processed_docs = await asyncio.gather(*processing_tasks)
+            
+            # Filter out None results and add valid documents to visual_docs
+            visual_docs = [doc for doc in processed_docs if doc is not None]
+            
+            logger.info(f"Successfully processed {len(visual_docs)} documents")
+            
         except Exception as e:
             logger.error(f"Error searching for visual documents: {e}")
-            
         
         return visual_docs
+
+    async def _process_single_page(self, page_path: str, page_metadata: Dict) -> Optional[Document]:
+        """
+        Process a single page, including loading and preparing the document.
+        
+        Args:
+            page_path: Path to the image file
+            page_metadata: Metadata for the page
+            
+        Returns:
+            Document object if successful, None if failed
+        """
+        try:
+            # Load the image with the specified max size
+            img_base64 = await self._load_image_from_path(page_path)
+            
+            if not img_base64:
+                logger.warning(f"Could not load image for path: {page_path}")
+                return None
+            
+            # Create a rich description for the image
+            description = f"Visual search result with confidence score: {page_metadata.get('score', 0.0):.2f}\n"
+            
+            # Add book info if available
+            if 'pdf_title' in page_metadata:
+                description += f"Book: {page_metadata.get('pdf_title', 'Unknown')}\n"
+            
+            # Add page info if available
+            if 'page_num' in page_metadata:
+                description += f"Page: {page_metadata.get('page_num', 'Unknown')}\n"
+            
+            # Add the source path and base64 image to metadata
+            page_metadata['source'] = page_path
+            page_metadata['image_base64'] = img_base64
+            
+            # Create and return the document
+            doc = Document(
+                page_content=description,
+                metadata=page_metadata
+            )
+            
+            logger.info(f"Added visual result for page {page_metadata.get('page_num', 'unknown')}")
+            return doc
+            
+        except Exception as e:
+            logger.error(f"Error processing page {page_path}: {e}")
+            return None
 
     async def _prepare_gemini_messages(self, 
                                       state: State, 
@@ -904,3 +716,72 @@ class Retriever:
         except Exception as e:
             logger.error(f"Error checking service health: {e}")
             return False
+
+    async def retrieve(self, state: State) -> Dict[str, List[Document]]:
+        """
+        Retrieve relevant documents based on the query.
+        
+        Args:
+            state: The current state containing the query.
+            
+        Returns:
+            A dictionary with forum_docs and visual_docs.
+        """
+        if not state.query:
+            raise ValueError("No query provided")
+        
+        try:
+            with cl.Step(name="Load Data", type="tool") as retrieve_step:
+                # Get forum documents
+                forum_docs = await self._retrieve_forum_docs(state)
+                
+                # Get visual documents
+                visual_docs = await self._retrieve_visual_docs(state)
+            
+                # Update step with the result
+                retrieve_step.output = f"Retrieved {len(forum_docs) + len(visual_docs)} documents"
+                await retrieve_step.update()
+
+            return {
+                "forum_docs": forum_docs,
+                "visual_docs": visual_docs,
+            }
+        except Exception as e:
+            logger.error(f"Error retrieving documents: {e}")
+            retrieve_step.error = str(e)
+            retrieve_step.status = "error"
+            raise RetrievalError(f"Error retrieving documents: {e}")
+    
+    async def _retrieve_forum_docs(self, state: State) -> List[Document]:
+        """
+        Retrieve forum documents based on the query.
+        
+        Args:
+            state: The current state containing the query.
+            
+        Returns:
+            A list of forum documents.
+        """
+        forum_docs = []
+        
+        # Search for documents in forum content
+        try:
+            logger.info(f"Searching for forum documents with query: {state.query}")
+            
+            # Use the service client to search for documents
+            results = await self.corpus_client.chroma_search(
+                query=state.query.query,
+                k=CONFIG.corpus_chroma_search_k,
+                filter={"topics": state.query.topics},
+            )
+            
+            if results:
+                logger.info(f"Found {len(results)} forum documents")
+                forum_docs = results
+            else:
+                logger.info("No forum documents found")
+        except Exception as e:
+            logger.error(f"Error searching for forum documents: {e}")
+            # Continue with empty forum_docs
+        
+        return forum_docs

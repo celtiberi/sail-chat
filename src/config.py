@@ -132,6 +132,7 @@ class RetrieverConfig:
     forum_collection: str = "forum_content"
     num_forum_results: int = 10
     data_dir: Path = Path(os.getenv("DATA_DIR", "data"))  # Path to data directory
+    max_image_size: int = 512
     
     # ChromaDB configuration
     local_db_path: str = "./chroma_db"
