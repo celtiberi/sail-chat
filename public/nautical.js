@@ -1,5 +1,29 @@
 // Nautical Theme JavaScript
-console.log('nautical.js loading...');
+console.log('nautical.js loading... v1.1.0'); // Added version number for tracking
+
+// Cache-busting mechanism
+(function() {
+    // Check if this is a new version that needs cache busting
+    const currentVersion = '1.1.0';
+    const storedVersion = localStorage.getItem('nauticalVersion');
+    
+    if (storedVersion !== currentVersion) {
+        console.log('New version detected, clearing cache data...');
+        // Clear any cached data
+        localStorage.removeItem('nauticalGuideShown');
+        // Store the new version
+        localStorage.setItem('nauticalVersion', currentVersion);
+        
+        // Force reload if this isn't the initial page load
+        if (storedVersion) {
+            console.log('Reloading page to apply updates...');
+            // Add a small delay to ensure logging completes
+            setTimeout(() => {
+                window.location.reload(true);
+            }, 100);
+        }
+    }
+})();
 
 // Initialize Google Analytics
 if (!window.gtag) {  // Only initialize if not already present
@@ -86,6 +110,9 @@ document.addEventListener('DOMContentLoaded', function() {
                 <h4 style="margin-top: 0; color: #4a90e2; font-size: 16px;">🆕 Recent Updates:</h4>
                 <ul style="padding-left: 20px; margin-bottom: 10px;">
                     <li><strong>DeepSeek Integration:</strong> We've integrated with DeepSeek for enhanced reasoning responses, providing more detailed and accurate nautical information.</li>
+                    <li>Improved response times for complex navigation questions</li>
+                    <li>Enhanced technical knowledge about boat maintenance and repairs</li>
+                    <li>Automatic updates - no need to clear your cache!</li>
                 </ul>
             </div>
             
