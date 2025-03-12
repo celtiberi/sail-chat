@@ -34,49 +34,6 @@ logger = logging.getLogger(__name__)
 # Get list of topics from the Literal type
 FORUM_TOPICS_LIST = list(get_args(ForumTopic))
 
-# Define base templates
-BASE_QUERY_TEMPLATE = """Given a question, create a search query that will help find relevant information to answer it.
-    Focus on extracting key terms and concepts. Also determine which forum topic would be most relevant.
-    
-    Available topics:
-    %(topics)s
-    
-    Question: {question}
-    
-    Return a search query and the most relevant topic from the list above."""
-
-BASE_SYSTEM_TEMPLATE = """
-    You are a wise sea captain with decades of sailing and boating experience. 
-    Your task is to help new sailors understand the ways of the sea using the following context.
-    
-    Previous conversation:
-    {chat_history}
-    
-    Here's the relevant textual information from various sailing/boating sources:
-    {context}
-    
-    Note: The user's message may also contain visual information (images) that provides additional context.
-    
-    Remember:
-    1. Use nautical terms but explain them
-    2. Be patient and detailed - these are new sailors asking
-    3. If the users question doesn't make sense, ask them to clarify it.  Do not just make up an answer.
-    4. If you find multiple solutions, list them all
-    5. If the context isn't sufficient, answer as best as you can and admit it.  This is important. We do not want to give them bad advice for the dangerous seas of boating.
-    6. Refrain from talking about users or the forums.  Just stick to the information.
-    7. Do not use phrases like "The text mentions".  Talk as though all of the information is yours so that there is no confusion.
-    9. Do not use phrases like "described in AN114" or "waypoint AN1174".  The user cannot see what you are referring to so you must describe it.
-    10. Do not quote passages from the context.  Just use the information to answer the question.
-    11. When asked for help with a sailing route, give as much details as possible.  What to be wary of, prevailing winds, weather conditions, best times of year for the trip, and anything else that is important.
-    11. Format your response using these markdown guidelines:
-      - Use #### for main headings (smaller and cleaner)
-      - Use ##### for subsections
-      - Use - for bullet points
-      - Use *italics* for nautical terms
-      - Use **bold** for important points
-      - Use > for tips and explanations
-      - Keep paragraphs short and well-spaced
-"""
 
 class RetrievalError(Exception):
     """Custom error for retrieval failures"""
@@ -99,19 +56,18 @@ class Retriever:
         # Create or use the provided LLM
         logger.info(f"Creating LLM: {APP_CONFIG.llm.model_name} with max_tokens: {APP_CONFIG.llm.max_tokens}")
         self.llm = ChatGoogleGenerativeAI(
-            model=APP_CONFIG.llm.model_name,
+            model="gemini-2.0-flash",
             temperature=APP_CONFIG.llm.temperature,
             # max_output_tokens=APP_CONFIG.llm.max_tokens,
             # top_p=APP_CONFIG.llm.top_p,
             streaming=True,
         )
 
-        if APP_CONFIG.llm.model_name == "deepseek-chat":
-            logger.info(f"Creating LLM: {APP_CONFIG.llm.model_name} with max_tokens: {APP_CONFIG.llm.max_tokens}")
-            self.deepseek_client = AsyncOpenAI(
-                api_key=os.getenv("DEEP_SEEK_API_KEY"),
-                base_url="https://api.deepseek.com"
-            )
+        logger.info(f"Creating LLM: {APP_CONFIG.llm.model_name} with max_tokens: {APP_CONFIG.llm.max_tokens}")
+        self.deepseek_client = AsyncOpenAI(
+            api_key=os.getenv("DEEPSEEK_API_KEY"),
+            base_url="https://api.deepseek.com"
+        )
 
         # Log the actual configuration used
         logger.info(f"LLM Configuration: model={APP_CONFIG.llm.model_name}, "
@@ -411,12 +367,12 @@ class Retriever:
             raise ValueError("No query provided")
         
         try:
-            with cl.Step(name="Generate Context", type="tool") as retrieve_step:
+            with cl.Step(name="Load Data", type="tool") as retrieve_step:
                 # Get forum documents
                 forum_docs = await self._retrieve_forum_docs(state)
                 
                 # Get visual documents
-                visual_docs = await self._retrieve_visual_docs(state)
+                visual_docs = await self._retrieve_visual_docs(state, include_adjacent_pages=False)
             
                 # Update step with the result
                 retrieve_step.output = f"Retrieved {len(forum_docs) + len(visual_docs)} documents"
@@ -469,12 +425,13 @@ class Retriever:
         
         return forum_docs
     
-    async def _retrieve_visual_docs(self, state: State) -> Tuple[List[Document], List[str]]:
+    async def _retrieve_visual_docs(self, state: State, include_adjacent_pages: bool = True) -> Tuple[List[Document], List[str]]:
         """
         Retrieve visual documents based on the query.
         
         Args:
             state: The current state containing the query.
+            include_adjacent_pages: Whether to include adjacent pages in the results (default: True)
             
         Returns:
             A tuple containing a list of visual documents and a list of visual file paths.
@@ -517,9 +474,10 @@ class Retriever:
                     # Get all pages (main and adjacent)
                     all_pages = [(path_str, main_metadata)]
                     
-                    # Get adjacent pages and add them to the list
-                    adjacent_pages = await self._get_adjacent_pages(path_str, main_metadata)
-                    all_pages.extend(adjacent_pages)
+                    # Get adjacent pages and add them to the list if requested
+                    if include_adjacent_pages:
+                        adjacent_pages = await self._get_adjacent_pages(path_str, main_metadata)
+                        all_pages.extend(adjacent_pages)
                     
                     # Create document for each page
                     for page_path, page_metadata in all_pages:
@@ -575,8 +533,6 @@ class Retriever:
                         else:
                             logger.warning(f"Could not load image for path: {page_path}")
                 
-               
-                    
             else:
                 logger.info("No visual documents found")
         except Exception as e:
@@ -585,6 +541,55 @@ class Retriever:
         
         return visual_docs
 
+    async def _prepare_gemini_messages(self, 
+                                      state: State, 
+                                      docs_content: str, 
+                                      visual_content: List[Dict], 
+                                      formatted_chat_history: str,
+                                      custom_prompt: Optional[str] = None):
+        """
+        Prepare messages for the Gemini model.
+        
+        Args:
+            state: The current state containing the question
+            docs_content: Text content from retrieved documents
+            visual_content: List of visual content items (images, etc.)
+            formatted_chat_history: Formatted chat history string
+            custom_prompt: Optional custom system prompt (if None, uses CONFIG.system_template)
+            
+        Returns:
+            Formatted messages ready to be sent to the Gemini model
+        """
+        user_message_content = [
+            {"type": "text", "text": state.question}
+        ]
+        
+        # Add visual content if available
+        if visual_content:
+            user_message_content.extend(visual_content)
+        
+        # Use custom prompt if provided, otherwise use the default
+        system_prompt = custom_prompt if custom_prompt else CONFIG.system_template
+        
+        # Format the system prompt with chat history and context
+        formatted_system_prompt = system_prompt.format(
+            chat_history=formatted_chat_history,
+            context=docs_content
+        )
+        
+        # Create a modified prompt template that can handle multimodal content
+        multimodal_prompt = ChatPromptTemplate.from_messages([
+            ("system", formatted_system_prompt),
+            ("user", user_message_content)
+        ])
+        
+        # Format the prompt to get the messages
+        messages = await multimodal_prompt.ainvoke({})
+        
+        return messages
+
+    
+        
     async def generate(self, state: State) -> Dict[str, str]:
         """Generate response using both current and running context."""
         try:
@@ -606,19 +611,54 @@ class Retriever:
             visual_content = await self._prepare_visual_message_items(state)
 
             if APP_CONFIG.llm.model_name == "gemini-2.0-flash":
-                response_content = await self.google_flash_stream(
-                    state, 
-                    docs_content, 
-                    visual_content, 
-                    formatted_chat_history, 
-                    current_message=state.current_message)                  
+                # Initialize an empty response
+                full_response = ""
+                
+                # Stream the response to the current message                
+                async for chunk in self.google_flash_stream(
+                    state=state, 
+                    docs_content=docs_content, 
+                    visual_content=visual_content, 
+                    formatted_chat_history=formatted_chat_history):
+                    # Stream to the message for visibility during generation
+                    await state.current_message.stream_token(chunk)
+                    # Collect the full response
+                    full_response += chunk
+                
+                response_content = full_response
+            
             elif APP_CONFIG.llm.model_name == "deepseek":
-                response_content = await self.deepseek_stream(
-                    state, 
-                    docs_content, 
-                    visual_content, 
-                    formatted_chat_history, 
-                    current_message=state.current_message)  
+                # Initialize an empty response
+                full_response = ""
+                logger.info("Generating flash context")
+                with cl.Step(name="Generate Context", type="tool") as retrieve_step:
+                    flash_response = await self.google_flash_complete(
+                        state=state, 
+                        docs_content=docs_content, 
+                        visual_content=visual_content, 
+                        formatted_chat_history=formatted_chat_history, # TODO prob do not want chat history
+                        custom_prompt=CONFIG.context_template) 
+                    # Update step with the result
+                    retrieve_step.output = flash_response
+                    logger.info("Context received")
+                    await retrieve_step.update()
+
+                # Stream the response to the current message
+                async for chunk in self.deepseek_stream(
+                    state=state, 
+                    docs_content=docs_content, 
+                    visual_content=visual_content, 
+                    formatted_chat_history=formatted_chat_history,
+                    flash_response=flash_response):
+                    # Stream to the message for visibility during generation
+                    await state.current_message.stream_token(chunk)
+                    # Collect the full response
+                    full_response += chunk
+                
+                # Send the message after streaming is complete
+                await state.current_message.send()
+                
+                response_content = full_response
 
             return {
                 "answer": response_content,
@@ -633,66 +673,114 @@ class Retriever:
                                   state: State, 
                                   docs_content: str, 
                                   visual_content: List[Dict], 
-                                  formatted_chat_history: str, 
-                                  step_name: str = "Generate Response",
-                                  current_message = None):
-
-            # Visual conent must go here because of how the LLM works
-            user_message_content = [
-                {"type": "text", "text": state.question}
-            ]
+                                  formatted_chat_history: str,                                   
+                                  custom_prompt: Optional[str] = None):
+        """
+        Generate a response using Google's Gemini model with streaming.
+        
+        Args:
+            state: The current state containing the question
+            docs_content: Text content from retrieved documents
+            visual_content: List of visual content items (images, etc.)
+            formatted_chat_history: Formatted chat history string
+            custom_prompt: Optional custom system prompt (if None, uses CONFIG.system_template)
             
-            # Add visual content if available
-            if visual_content:
-                user_message_content.extend(visual_content)
-            
-            # Create a modified prompt template that can handle multimodal content
-            multimodal_prompt = ChatPromptTemplate.from_messages([
-                ("system", CONFIG.system_template.format(
-                    chat_history=formatted_chat_history,
-                    context=docs_content
-                )),
-                ("user", user_message_content)
-            ])
-            
-            # Format the prompt to get the messages
-            messages = await multimodal_prompt.ainvoke({})
-            
-            # Initialize an empty response
-            full_response = ""
-            
-            # Get the stream
-            stream = self.llm.astream(messages)
-            
-            async with cl.Step(name=step_name) as generate_step:
-                generate_step.output = "streaming response..."
-                await generate_step.update()      
-                async for chunk in stream:
-                    if chunk.content:
-                        if current_message:
-                            # Stream to the message for visibility during generation                    
-                            await state.current_message.stream_token(chunk.content)
-                        
-                        # Collect the full response
-                        full_response += chunk.content
-            
-            logger.info("Response streaming completed")
-            
-            return full_response
+        Returns:
+            An async generator yielding content chunks
+        """
+        # Get formatted messages
+        messages = await self._prepare_gemini_messages(
+            state, 
+            docs_content, 
+            visual_content, 
+            formatted_chat_history,
+            custom_prompt
+        )
+        
+        # Get the stream
+        response_stream = self.llm.astream(messages)
     
-    async def deepseek_stream(self, state: State, messages: PromptValue):        
-        # TODO deepseek reasoner cant handle images.  Need to use google flash
-        # to generate the context for the deepseek reasoner
-        # Deepseek can take 64K token, google flash returns 8k... what to do?
-        # well mulltible flash calls I guess
+        # Stream the response and yield each chunk
+        async for chunk in response_stream:
+            if chunk.content:
+                # Yield the chunk for the caller to handle
+                yield chunk.content
+    
+        logger.info("Response streaming completed")
+    
+    async def google_flash_complete(self, 
+                                   state: State, 
+                                   docs_content: str, 
+                                   visual_content: List[Dict], 
+                                   formatted_chat_history: str, 
+                                   custom_prompt: Optional[str] = None):
+        """
+        Generate a complete response using Google's Gemini model without streaming.
+        
+        Args:
+            state: The current state containing the question
+            docs_content: Text content from retrieved documents
+            visual_content: List of visual content items (images, etc.)
+            formatted_chat_history: Formatted chat history string
+            custom_prompt: Optional custom system prompt (if None, uses CONFIG.system_template)
+            
+        Returns:
+            The complete response as a string
+        """
+        # Get formatted messages
+        messages = await self._prepare_gemini_messages(
+            state, 
+            docs_content, 
+            visual_content, 
+            formatted_chat_history,
+            custom_prompt
+        )
+        
+        response = await self.llm.ainvoke(messages)
+        full_response = response.content
+        
+        logger.info("Response generation completed")
+        
+        # Return the full response
+        return full_response
 
+    async def deepseek_stream(self, 
+                              state: State, 
+                              docs_content: str, 
+                              visual_content: List[Dict], 
+                              formatted_chat_history: str,
+                              flash_response: str):
+        """
+        Generate a response using DeepSeek's model with reasoning capabilities.
+        
+        Args:
+            state: The current state containing the question
+            docs_content: Text content from retrieved documents
+            visual_content: List of visual content items (images, etc.)
+            formatted_chat_history: Formatted chat history string
+            
+        Returns:
+            An async generator yielding content chunks
+        """
+        # Call deepseek with a prompt that it is generating a response for AI consumption
         start = time.time()
 
+        # Prepare system message with context
+        system_prompt = CONFIG.system_template
+        system_content = system_prompt.format(
+            chat_history=formatted_chat_history,
+            context=flash_response
+        )
+
+        # user_message_content = [
+        #     {"type": "text", "text": state.question}
+        # ]
+        # todo need max_tokens 8k, defaults to 4k
         stream = await self.deepseek_client.chat.completions.create(
             model="deepseek-reasoner",
             messages=[
-                {"role": "system", "content": "You are an helpful assistant"},
-                *cl.chat_context.to_openai()
+                {"role": "system", "content": system_content},
+                {"role": "user", "content": state.question}
             ],
             stream=True
         )
@@ -715,21 +803,12 @@ class Retriever:
                     thinking_completed = True
                     break
         
-        
-        final_answer = state.current_message
-
-        full_response = ""
         # Streaming the final answer
         async for chunk in stream:
             delta = chunk.choices[0].delta
             if delta.content:
-                await final_answer.stream_token(delta.content)
-                # Collect the full response
-                full_response += delta.content
-                
-        await final_answer.send()
-        
-        return full_response
+                # Yield the content chunk for the caller to handle
+                yield delta.content
 
     async def check_service_health(self) -> bool:
         """

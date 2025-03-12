@@ -29,7 +29,8 @@ is_apple_silicon = platform.system() == "Darwin" and platform.machine().startswi
 @dataclass
 class LLMConfig:
     """Language Model Configuration"""
-    model_name: str = field(default_factory=lambda: os.getenv("MODEL_NAME", "gemini-2.0-flash"))
+    # model_name: str = field(default_factory=lambda: os.getenv("MODEL_NAME", "gemini-2.0-flash"))
+    model_name: str = field(default_factory=lambda: os.getenv("MODEL_NAME", "deepseek"))
     temperature: float = field(default_factory=lambda: float(os.getenv("TEMPERATURE", "0.7")))
     top_p: float = field(default_factory=lambda: float(os.getenv("TOP_P", "0.8")))
     max_tokens: Optional[int] = field(default_factory=lambda: int(os.getenv("MAX_TOKENS", "0")) or None)  # Max output length (None = model default)
@@ -72,16 +73,18 @@ BASE_SYSTEM_TEMPLATE = """
     
     Remember:
     1. Use nautical terms but explain them
-    2. Be patient and detailed - these are new sailors asking
-    3. If the users question doesn't make sense, ask them to clarify it.  Do not just make up an answer.
-    4. If you find multiple solutions, list them all
-    5. If the context isn't sufficient, answer as best as you can and admit it.  This is important. We do not want to give them bad advice for the dangerous seas of boating.
-    6. Refrain from talking about users or the forums.  Just stick to the information.
-    7. Do not use phrases like "The text mentions".  Talk as though all of the information is yours so that there is no confusion.
+    Rules:
+    2. When generating routes be careful to only include information that is relevant to the question. You maybe be given information that is not relevant in the context.  You will have to think about the locations of countries and ports.
+    3. Be patient and detailed - these are new sailors asking
+    4. If the users question doesn't make sense, ask them to clarify it.  Do not just make up an answer.
+    5. If you find multiple solutions, list them all
+    6. If the context isn't sufficient, answer as best as you can and admit it.  This is important. We do not want to give them bad advice for the dangerous seas of boating.
+    7. Refrain from talking about users or the forums.  Just stick to the information.
+    8. Do not use phrases like "The text mentions".  Talk as though all of the information is yours so that there is no confusion.
     9. Do not use phrases like "described in AN114" or "waypoint AN1174".  The user cannot see what you are referring to so you must describe it.
     10. Do not quote passages from the context.  Just use the information to answer the question.
     11. When asked for help with a sailing route, give as much details as possible.  What to be wary of, prevailing winds, weather conditions, best times of year for the trip, and anything else that is important.
-    11. Format your response using these markdown guidelines:
+    12. Format your response using these markdown guidelines:
       - Use #### for main headings (smaller and cleaner)
       - Use ##### for subsections
       - Use - for bullet points
@@ -90,7 +93,30 @@ BASE_SYSTEM_TEMPLATE = """
       - Use > for tips and explanations
       - Keep paragraphs short and well-spaced
 """
+GENERATE_CONTEXT_TEMPLATE = """
+    You are a helpful nautical assistant specializing in sailing and boating knowledge.
+    Your goal is to generate a response that will be consumed as context by an LLM to answer a question. Format accordingly.
+    Pull relevant information from the provided corpus that is needed to answer the question.
+    Your reponse needs to be complete.  Include all useful information so that you can help your other AI friend. 
+    If leave out useful information it won't be able to answer the question.
 
+    Previous conversation:
+    {chat_history}
+    
+    Here's the relevant information from various sailing/boating sources:
+    {context}
+
+    Generate a response that will be used as context for an LLM to answer the question.
+
+    Rules:
+    1. When generating route information be very detailed.  You must include all information (waypoints, port information, hazards, time of year weather conditions, etc.)
+    2. When generating route information think carefully about the countries involved and the direction the user is going.
+    3. Do not skimp on information.  Use your full context.
+    
+"""
+# RULES:
+#     1. Do not include names of waypoints (e.g. Waypoint AN915). Just use the GPS coordinates.
+#     2. Use the books and forum post to answer the question, but do not include the names of the books or the forum posts in your response.
 @dataclass
 class RetrieverConfig:
     """Configuration for the Retriever"""
@@ -98,9 +124,10 @@ class RetrieverConfig:
     corpus_chroma_search_k: int = 10  # Number of results to retrieve from chroma search service
 
     doc_window_size: int = 30      # Maximum number of docs to keep in context window
-    chat_window_size: int = 10     # Number of message pairs to keep in chat history
+    chat_window_size: int = 5     # Number of message pairs to keep in chat history
     query_template: str = ""
     system_template: str = ""
+    context_template: str = ""
     chat: dict = field(default_factory=dict)
     forum_collection: str = "forum_content"
     num_forum_results: int = 10
@@ -174,7 +201,8 @@ RETRIEVER_CONFIG = RetrieverConfig(
     query_template=BASE_QUERY_TEMPLATE % {
         "topics": "\n".join(f"- {topic}" for topic in FORUM_TOPICS_LIST)
     },
-    system_template=BASE_SYSTEM_TEMPLATE
+    system_template=BASE_SYSTEM_TEMPLATE,
+    context_template=GENERATE_CONTEXT_TEMPLATE
 )
 
 # Check if the data directory exists
@@ -234,7 +262,7 @@ class Config(BaseModel):
     chroma_db_dir: Path = Field(default_factory=lambda: Path(os.getenv("CHROMA_DB_DIR", "chroma_db")))
     
     # Model configuration
-    model_name: str = os.getenv("MODEL_NAME", "gemini-1.5-pro-latest")
+    model_name: str = os.getenv("MODEL_NAME", "gemini-2.0-flash")
     temperature: float = float(os.getenv("TEMPERATURE", "0.2"))
     max_tokens: int = int(os.getenv("MAX_TOKENS", "8000"))
     top_p: float = float(os.getenv("TOP_P", "0.95"))
