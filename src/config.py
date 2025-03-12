@@ -124,7 +124,7 @@ class RetrieverConfig:
     corpus_chroma_search_k: int = 10  # Number of results to retrieve from chroma search service
 
     doc_window_size: int = 30      # Maximum number of docs to keep in context window
-    chat_window_size: int = 5     # Number of message pairs to keep in chat history
+    chat_window_size: int = 2     # Number of message pairs to keep in chat history
     query_template: str = ""
     system_template: str = ""
     context_template: str = ""

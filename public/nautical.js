@@ -1,10 +1,17 @@
 // Nautical Theme JavaScript
-console.log('nautical.js loading... v1.1.2'); // Added version number for tracking
+console.log('nautical.js loading...'); 
+
+// Ensure config is loaded
+if (!window.NAUTICAL_CONFIG) {
+    console.error('Nautical configuration not found! Please ensure config.js is loaded before nautical.js');
+    window.NAUTICAL_CONFIG = { version: '0.0.0', analytics_id: 'G-WQQYFQL32V' }; // Fallback config
+}
 
 // Cache-busting mechanism
 (function() {
     // Check if this is a new version that needs cache busting
-    const currentVersion = '1.1.1';
+    const currentVersion = window.NAUTICAL_CONFIG.version;
+    console.log(`Current version: ${currentVersion}`);
     const storedVersion = localStorage.getItem('nauticalVersion');
     
     if (storedVersion !== currentVersion) {
@@ -26,26 +33,32 @@ console.log('nautical.js loading... v1.1.2'); // Added version number for tracki
 })();
 
 // Initialize Google Analytics
-if (!window.gtag) {  // Only initialize if not already present
+if (!window.gtag && window.NAUTICAL_CONFIG.features.analytics) {  // Only initialize if not already present and enabled
     console.log('Initializing Google Analytics...');
 
     // Create and inject the gtag.js script
     const gtagScript = document.createElement('script');
     gtagScript.async = true;
-    gtagScript.src = 'https://www.googletagmanager.com/gtag/js?id=G-WQQYFQL32V';
+    gtagScript.src = `https://www.googletagmanager.com/gtag/js?id=${window.NAUTICAL_CONFIG.analytics_id}`;
     document.head.appendChild(gtagScript);
 
     // Initialize gtag
     window.dataLayer = window.dataLayer || [];
     window.gtag = function () { dataLayer.push(arguments); }
     gtag('js', new Date());
-    gtag('config', 'G-WQQYFQL32V');
+    gtag('config', window.NAUTICAL_CONFIG.analytics_id);
 
     console.log('Google Analytics initialized');
 }
 
 // Add user guide when the DOM is fully loaded
 document.addEventListener('DOMContentLoaded', function() {
+    // Only show user guide if enabled in config
+    if (!window.NAUTICAL_CONFIG.features.userGuide) {
+        console.log('User guide disabled in config');
+        return;
+    }
+
     console.log('DOMContentLoaded fired in nautical.js');
     
     // Add animations to the document
@@ -109,6 +122,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 <h4 style="margin-top: 0; color: #4a90e2; font-size: 16px;">🆕 Recent Updates:</h4>
                 <ul style="padding-left: 20px; margin-bottom: 10px;">
                     <li><strong>DeepSeek Integration:</strong> We've integrated with DeepSeek for enhanced reasoning responses, providing more detailed and accurate nautical information.</li>
+                    <li>Version ${window.NAUTICAL_CONFIG.version}</li>
                 </ul>
             </div>
             
@@ -138,52 +152,3 @@ document.addEventListener('DOMContentLoaded', function() {
         localStorage.removeItem('nauticalGuideShown');
     });
 });
-
-// Add nautical-themed message animations
-function addMessageAnimation(message) {
-    message.classList.add('message-animation');
-    setTimeout(() => {
-        message.classList.remove('message-animation');
-    }, 1000);
-}
-
-// Add nautical-themed file upload handling
-function handleFileUpload(event) {
-    const file = event.target.files[0];
-    if (file) {
-        const fileType = file.type;
-        if (fileType.startsWith('image/')) {
-            // Add image preview with nautical frame
-            const preview = document.createElement('div');
-            preview.className = 'nautical-image-preview';
-            const img = document.createElement('img');
-            img.src = URL.createObjectURL(file);
-            preview.appendChild(img);
-            document.querySelector('.file-upload').appendChild(preview);
-        }
-    }
-}
-
-// Add nautical-themed error handling
-function showError(message) {
-    const errorContainer = document.createElement('div');
-    errorContainer.className = 'nautical-error';
-    errorContainer.textContent = message;
-    document.body.appendChild(errorContainer);
-    
-    setTimeout(() => {
-        errorContainer.remove();
-    }, 5000);
-}
-
-// Add nautical-themed success messages
-function showSuccess(message) {
-    const successContainer = document.createElement('div');
-    successContainer.className = 'nautical-success';
-    successContainer.textContent = message;
-    document.body.appendChild(successContainer);
-    
-    setTimeout(() => {
-        successContainer.remove();
-    }, 3000);
-} 

@@ -388,7 +388,7 @@ class Retriever:
         
         return adjacent_pages
 
-    async def retrieve(self, state: State, include_adjacent_pages: bool = True, max_image_size: int = 800) -> Dict[str, List[Document]]:
+    async def retrieve(self, state: State, max_image_size: int = 800) -> Dict[str, List[Document]]:
         """
         Retrieve relevant documents based on the query.
         
@@ -411,7 +411,7 @@ class Retriever:
                 # Get visual documents
                 visual_docs = await self._retrieve_visual_docs(
                     state, 
-                    include_adjacent_pages=include_adjacent_pages,
+                    include_adjacent_pages=False,
                     max_image_size=max_image_size
                 )
             
@@ -585,9 +585,9 @@ class Retriever:
 
     async def _prepare_gemini_messages(self, 
                                       state: State, 
-                                      docs_content: str, 
-                                      visual_content: List[Dict], 
-                                      formatted_chat_history: str,
+                                      formatted_chat_history:  Optional[str] = '',
+                                      docs_content: Optional[str] = '', 
+                                      visual_content: Optional[List[Dict]] = None, 
                                       custom_prompt: Optional[str] = None):
         """
         Prepare messages for the Gemini model.
@@ -672,18 +672,53 @@ class Retriever:
             elif APP_CONFIG.llm.model_name == "deepseek":
                 # Initialize an empty response
                 full_response = ""
+                source_index = 1
                 logger.info("Generating flash context")
                 with cl.Step(name="Generate Context", type="tool") as retrieve_step:
-                    flash_response = await self.google_flash_complete(
-                        state=state, 
-                        docs_content=docs_content, 
-                        visual_content=visual_content, 
-                        formatted_chat_history=formatted_chat_history, # TODO prob do not want chat history
-                        custom_prompt=CONFIG.context_template) 
-                    # Update step with the result
-                    retrieve_step.output = flash_response
-                    logger.info("Context received")
-                    await retrieve_step.update()
+                    # Prepare all context generation tasks
+                    task_mapping = {}  # Map tasks to their types
+                    tasks = []
+                    # Add docs context task if we have docs_content
+                    if docs_content:
+                        docs_task = self.google_flash_complete(
+                            state=state, 
+                            docs_content=docs_content, 
+                            visual_content=None, 
+                            formatted_chat_history="",#formatted_chat_history,
+                            custom_prompt=CONFIG.context_template
+                        )
+                        tasks.append(docs_task)
+                    
+                    # Add tasks for each visual item
+                    for visual_item in visual_content:
+                        image_task = self.google_flash_complete(
+                            state=state,              
+                            formatted_chat_history="",
+                            docs_content="",
+                            visual_content=[visual_item],
+                            custom_prompt=CONFIG.context_template
+                        )
+                        tasks.append(image_task)
+                    
+                    # Process results as they complete
+                    response_content = ""
+                    current_index = 1
+                    
+                    # Process results as they arrive
+                    for task in asyncio.as_completed(tasks):
+                        result = await task
+                        
+                        with cl.Step(name=f"Source {current_index}", type="tool") as source_step:
+                            source_step.output = result
+                            await source_step.update()
+                            response_content += f"\n\nSource {current_index}:\n{result}"
+                        current_index += 1
+
+                # Final update to the main retrieve step
+                retrieve_step.output = response_content
+                await retrieve_step.update()
+
+                logger.info("Context generation completed")
 
                 # Stream the response to the current message
                 async for chunk in self.deepseek_stream(
@@ -691,7 +726,7 @@ class Retriever:
                     docs_content=docs_content, 
                     visual_content=visual_content, 
                     formatted_chat_history=formatted_chat_history,
-                    flash_response=flash_response):
+                    flash_response=response_content):
                     # Stream to the message for visibility during generation
                     await state.current_message.stream_token(chunk)
                     # Collect the full response
@@ -753,8 +788,8 @@ class Retriever:
     async def google_flash_complete(self, 
                                    state: State, 
                                    docs_content: str, 
-                                   visual_content: List[Dict], 
                                    formatted_chat_history: str, 
+                                   visual_content: Optional[List[Dict]] = None, 
                                    custom_prompt: Optional[str] = None):
         """
         Generate a complete response using Google's Gemini model without streaming.
@@ -772,9 +807,9 @@ class Retriever:
         # Get formatted messages
         messages = await self._prepare_gemini_messages(
             state, 
+            formatted_chat_history,
             docs_content, 
             visual_content, 
-            formatted_chat_history,
             custom_prompt
         )
         
