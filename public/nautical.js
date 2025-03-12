@@ -1,5 +1,5 @@
 // Nautical Theme JavaScript
-console.log('nautical.js loading... v1.1.0'); // Added version number for tracking
+console.log('nautical.js loading... v1.1.2'); // Added version number for tracking
 
 // Cache-busting mechanism
 (function() {
