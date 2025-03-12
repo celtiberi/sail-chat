@@ -109,9 +109,6 @@ document.addEventListener('DOMContentLoaded', function() {
                 <h4 style="margin-top: 0; color: #4a90e2; font-size: 16px;">🆕 Recent Updates:</h4>
                 <ul style="padding-left: 20px; margin-bottom: 10px;">
                     <li><strong>DeepSeek Integration:</strong> We've integrated with DeepSeek for enhanced reasoning responses, providing more detailed and accurate nautical information.</li>
-                    <li>Improved response times for complex navigation questions</li>
-                    <li>Enhanced technical knowledge about boat maintenance and repairs</li>
-                    <li>Automatic updates - no need to clear your cache!</li>
                 </ul>
             </div>
             
