@@ -214,7 +214,7 @@ async def test_service_client():
         # Try without filter first
         results = await client.chroma_search(
             query="sailing",
-            k=10,
+            k=CONFIG.corpus_chroma_search_k,
             filter=None
         )
         
@@ -223,7 +223,7 @@ async def test_service_client():
         # Try with filter
         results_with_filter = await client.chroma_search(
             query="sailing",
-            k=10,
+            k=CONFIG.corpus_chroma_search_k,
             filter={"topics": "General Sailing Forum"}
         )
         

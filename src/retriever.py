@@ -1,8 +1,10 @@
+import time
 from langchain_core.documents import Document
 from typing_extensions import Literal, get_args
 from pydantic import BaseModel, Field
 from typing import List, Dict, Any, Optional, Union, Tuple
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_core.prompt_values import PromptValue
 from langchain_core.language_models import BaseChatModel
 from langchain_core.vectorstores import VectorStore
 import logging
@@ -19,6 +21,7 @@ import asyncio
 import chainlit as cl
 from langchain_core.retrievers import BaseRetriever
 from langchain_google_genai import ChatGoogleGenerativeAI
+from openai import AsyncOpenAI
 import re
 import uuid
 
@@ -85,7 +88,6 @@ class Retriever:
     def __init__(
         self, 
         embedding_model: str = "all-MiniLM-L6-v2",
-        llm: Optional[BaseChatModel] = None
     ):
         """
         Initialize the retriever and create the LLM.
@@ -95,23 +97,27 @@ class Retriever:
             llm: Optional language model to use. If not provided, one will be created.
         """
         # Create or use the provided LLM
-        if llm is None:
+        logger.info(f"Creating LLM: {APP_CONFIG.llm.model_name} with max_tokens: {APP_CONFIG.llm.max_tokens}")
+        self.llm = ChatGoogleGenerativeAI(
+            model=APP_CONFIG.llm.model_name,
+            temperature=APP_CONFIG.llm.temperature,
+            # max_output_tokens=APP_CONFIG.llm.max_tokens,
+            # top_p=APP_CONFIG.llm.top_p,
+            streaming=True,
+        )
+
+        if APP_CONFIG.llm.model_name == "deepseek-chat":
             logger.info(f"Creating LLM: {APP_CONFIG.llm.model_name} with max_tokens: {APP_CONFIG.llm.max_tokens}")
-            self.llm = ChatGoogleGenerativeAI(
-                model=APP_CONFIG.llm.model_name,
-                temperature=APP_CONFIG.llm.temperature,
-                # max_output_tokens=APP_CONFIG.llm.max_tokens,
-                # top_p=APP_CONFIG.llm.top_p,
-                streaming=True,
+            self.deepseek_client = AsyncOpenAI(
+                api_key=os.getenv("DEEP_SEEK_API_KEY"),
+                base_url="https://api.deepseek.com"
             )
-            # Log the actual configuration used
-            logger.info(f"LLM Configuration: model={APP_CONFIG.llm.model_name}, "
-                       f"temperature={APP_CONFIG.llm.temperature}, "
-                       f"max_output_tokens={APP_CONFIG.llm.max_tokens}, "
-                       f"top_p={APP_CONFIG.llm.top_p}")
-        else:
-            self.llm = llm
-            logger.info("Using provided LLM")
+
+        # Log the actual configuration used
+        logger.info(f"LLM Configuration: model={APP_CONFIG.llm.model_name}, "
+                    f"temperature={APP_CONFIG.llm.temperature}, "
+                    f"max_output_tokens={APP_CONFIG.llm.max_tokens}, "
+                    f"top_p={APP_CONFIG.llm.top_p}")
         
         # Initialize the service client
         services_url = os.getenv("SERVICES_URL", "http://localhost:8081")
@@ -162,33 +168,17 @@ class Retriever:
         try:
             logger.info("Analyzing query")
             
-            # Create and send the analyze step without ephemeral parameter
-            analyze_step = cl.Step(name="Analyze Query", type="tool", show_input=True)
-            analyze_step.input = state.question
-            await analyze_step.send()
-            
-            # Store the step in the state
-            state.steps["analyze"] = analyze_step
-            
-            # Update the analyze step
-            analyze_step.output = "Analyzing query to generate optimized search terms..."
-            await analyze_step.update()
-            
             structured_llm = self.llm.with_structured_output(Search)
-            query = await structured_llm.ainvoke(
-                self.query_prompt.format(question=state.question)
-            )
+
+            with cl.Step(name="Analyze Query", type="tool") as analyze_step:
+                query = await structured_llm.ainvoke(
+                    self.query_prompt.format(question=state.question)
+                )
             
-            # Update step with the result
-            analyze_step.output = f"Generated search query: {query.query} in topic: {query.topics}"
-            await analyze_step.update()
+                # Update step with the result
+                analyze_step.output = f"Generated search query: {query.query}"
+                await analyze_step.update()
                 
-            # Mark the step as updated
-            if hasattr(state, 'updated_steps'):
-                state.updated_steps['analyze'] = True
-            
-            await analyze_step.remove()
-            logger.info(f"Analyze step removed")
 
             logger.info(f"Generated search query: {query}")
             return {
@@ -420,36 +410,20 @@ class Retriever:
         if not state.query:
             raise ValueError("No query provided")
         
-        # Create and send the retrieve step without ephemeral parameter
-        retrieve_step = cl.Step(name="Retrieve Documents", type="tool", show_input=True)
-        retrieve_step.input = f"Query: {state.query.query}, Topic: {state.query.topics}"
-        await retrieve_step.send()
-        
-        # Store the step in the state
-        state.steps["retrieve"] = retrieve_step
-        
-        # Update the retrieve step
-        retrieve_step.output = f"Retrieving documents for: {state.query.query}"
-        await retrieve_step.update()
-        
         try:
-            # Get forum documents
-            forum_docs = await self._retrieve_forum_docs(state)
+            with cl.Step(name="Generate Context", type="tool") as retrieve_step:
+                # Get forum documents
+                forum_docs = await self._retrieve_forum_docs(state)
+                
+                # Get visual documents
+                visual_docs = await self._retrieve_visual_docs(state)
             
-            # Get visual documents
-            visual_docs = await self._retrieve_visual_docs(state)
+                # Update step with the result
+                retrieve_step.output = f"Retrieved {len(forum_docs) + len(visual_docs)} documents"
+                await retrieve_step.update()
             
-            # Update step with the result
-            retrieve_step.output = f"Retrieved {len(forum_docs) + len(visual_docs)} documents"
-            await retrieve_step.update()
-            
-             # Mark the step as updated
-            if hasattr(state, 'updated_steps'):
-                state.updated_steps['retrieve'] = True
-            
-            # TODO: Probably no reason to update the step and then just remove it
-            await retrieve_step.remove()
-            logger.info(f"Retrieve step removed")
+            # await retrieve_step.remove()
+            # logger.info(f"Retrieve step removed")
 
             return {
                 "forum_docs": forum_docs,
@@ -480,6 +454,7 @@ class Retriever:
             # Use the service client to search for documents
             results = await self.corpus_client.chroma_search(
                 query=state.query.query,
+                k=CONFIG.corpus_chroma_search_k,
                 filter={"topics": state.query.topics},
             )
             
@@ -513,7 +488,7 @@ class Retriever:
             # Use the service client to search for visual documents
             results, paths = await self.corpus_client.visual_search(
                 query=state.query.query,
-                k=3,
+                k=CONFIG.corpus_visual_search_k,
             )
             # Update paths to include full data directory path
             paths = [str(CONFIG.data_dir / 'pdfs' / path) for path in paths]
@@ -615,20 +590,6 @@ class Retriever:
         try:
             logger.info("Generating response from context")            
             
-            # Create and send the generate step without ephemeral parameter
-            generate_step = cl.Step(name="Generate Response", type="run", show_input=False)
-            await generate_step.send()
-            
-            # Store the step in the state
-            state.steps["generate"] = generate_step
-            
-            # Update the generate step
-            generate_step.output = "Generating response from retrieved documents..."
-            await generate_step.update()
-            
-            # Get document IDs from current context
-            # current_ids = {getattr(doc, 'id', i) for i, doc in enumerate(state.current_context)}
-            
             # Trim chat history if needed
             chat_history = state.chat_history if state.chat_history else []
             if len(chat_history) > CONFIG.chat_window_size * 2:
@@ -644,7 +605,38 @@ class Retriever:
             docs_content = await self._prepare_forum_content(state)                        
             visual_content = await self._prepare_visual_message_items(state)
 
-            # Create the base message content with the user's question
+            if APP_CONFIG.llm.model_name == "gemini-2.0-flash":
+                response_content = await self.google_flash_stream(
+                    state, 
+                    docs_content, 
+                    visual_content, 
+                    formatted_chat_history, 
+                    current_message=state.current_message)                  
+            elif APP_CONFIG.llm.model_name == "deepseek":
+                response_content = await self.deepseek_stream(
+                    state, 
+                    docs_content, 
+                    visual_content, 
+                    formatted_chat_history, 
+                    current_message=state.current_message)  
+
+            return {
+                "answer": response_content,
+                "chat_history": chat_history
+            }
+        
+        except Exception as e:
+            logger.error(f"Error generating response: {e}")
+            return {"answer": "Apologies, but I encountered an error while trying to answer your question."} 
+
+    async def google_flash_stream(self, 
+                                  state: State, 
+                                  docs_content: str, 
+                                  visual_content: List[Dict], 
+                                  formatted_chat_history: str, 
+                                  step_name: str = "Generate Response",
+                                  current_message = None):
+
             # Visual conent must go here because of how the LLM works
             user_message_content = [
                 {"type": "text", "text": state.question}
@@ -672,46 +664,73 @@ class Retriever:
             # Get the stream
             stream = self.llm.astream(messages)
             
-            # Flag to track if streaming has started
-            streaming_started = False
-            
-            # Stream the response
-            async for chunk in stream:
-                if chunk.content:
-                    # If this is the first chunk with content, update and remove the step
-                    if not streaming_started:
-                        streaming_started = True
-                        logger.info("Streaming started, updating and removing generate step")
+            async with cl.Step(name=step_name) as generate_step:
+                generate_step.output = "streaming response..."
+                await generate_step.update()      
+                async for chunk in stream:
+                    if chunk.content:
+                        if current_message:
+                            # Stream to the message for visibility during generation                    
+                            await state.current_message.stream_token(chunk.content)
                         
-                        # Final update to the step
-                        generate_step.output = "Response generation started, streaming to message..."
-                        await generate_step.update()
-                        
-                        # Remove the step now that streaming has started
-                        await generate_step.remove()
-                        logger.info("Generate step removed at start of streaming")
-                    
-                    # Stream to the message for visibility during generation                    
-                    await state.current_message.stream_token(chunk.content)
-                    
-                    # Collect the full response
-                    full_response += chunk.content
+                        # Collect the full response
+                        full_response += chunk.content
             
             logger.info("Response streaming completed")
-            response_content = full_response
             
-            logger.info("Response generated successfully")
-            
-            return {
-                "answer": response_content,
-                "chat_history": chat_history
-            }
-        
-        except Exception as e:
-            logger.error(f"Error generating response: {e}")
-            return {"answer": "Apologies, but I encountered an error while trying to answer your question."} 
-
+            return full_response
     
+    async def deepseek_stream(self, state: State, messages: PromptValue):        
+        # TODO deepseek reasoner cant handle images.  Need to use google flash
+        # to generate the context for the deepseek reasoner
+        # Deepseek can take 64K token, google flash returns 8k... what to do?
+        # well mulltible flash calls I guess
+
+        start = time.time()
+
+        stream = await self.deepseek_client.chat.completions.create(
+            model="deepseek-reasoner",
+            messages=[
+                {"role": "system", "content": "You are an helpful assistant"},
+                *cl.chat_context.to_openai()
+            ],
+            stream=True
+        )
+
+        # Flag to track if we've exited the thinking step
+        thinking_completed = False
+        
+        # Streaming the thinking
+        async with cl.Step(name="Thinking") as thinking_step:
+            async for chunk in stream:
+                delta = chunk.choices[0].delta
+                reasoning_content = getattr(delta, "reasoning_content", None)
+                if reasoning_content is not None and not thinking_completed:
+                    await thinking_step.stream_token(reasoning_content)
+                elif not thinking_completed:
+                    # Exit the thinking step
+                    thought_for = round(time.time() - start)
+                    thinking_step.name = f"Thought for {thought_for}s"
+                    await thinking_step.update()
+                    thinking_completed = True
+                    break
+        
+        
+        final_answer = state.current_message
+
+        full_response = ""
+        # Streaming the final answer
+        async for chunk in stream:
+            delta = chunk.choices[0].delta
+            if delta.content:
+                await final_answer.stream_token(delta.content)
+                # Collect the full response
+                full_response += delta.content
+                
+        await final_answer.send()
+        
+        return full_response
+
     async def check_service_health(self) -> bool:
         """
         Check if the service is healthy.

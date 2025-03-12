@@ -22,9 +22,12 @@ async def test_health_check(client):
 @pytest.mark.asyncio
 async def test_visual_search(client):
     """Test the visual search endpoint."""
+    # Import the config
+    from src.config import RETRIEVER_CONFIG as CONFIG
+    
     # Test with a simple query
     query = "sailing boat"
-    results, paths = await client.visual_search(query=query, k=3)
+    results, paths = await client.visual_search(query=query, k=CONFIG.corpus_visual_search_k)
     
     # Log the results for debugging
     print(f"Visual search returned {len(results)} results")
@@ -55,9 +58,12 @@ async def test_visual_search(client):
 @pytest.mark.asyncio
 async def test_chroma_search(client):
     """Test the ChromaDB search endpoint."""
+    # Import the config
+    from src.config import RETRIEVER_CONFIG as CONFIG
+    
     # Test with a simple query
     query = "sailing"
-    docs = await client.chroma_search(query=query, k=5)
+    docs = await client.chroma_search(query=query, k=CONFIG.corpus_chroma_search_k)
     
     # Log the results for debugging
     print(f"ChromaDB search returned {len(docs)} documents")
@@ -77,9 +83,12 @@ async def test_chroma_search(client):
 @pytest.mark.asyncio
 async def test_chroma_search_alternative(client):
     """Test the ChromaDB search endpoint with an alternative query."""
+    # Import the config
+    from src.config import RETRIEVER_CONFIG as CONFIG
+    
     # Test with a different query
     query = "boat"
-    docs = await client.chroma_search(query=query, k=5)
+    docs = await client.chroma_search(query=query, k=CONFIG.corpus_chroma_search_k)
     
     # Log the results for debugging
     print(f"ChromaDB search (alternative) returned {len(docs)} documents")

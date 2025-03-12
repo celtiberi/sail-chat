@@ -199,32 +199,22 @@ async def main(message: cl.Message):
         # Create state for this retrieval process
         session.model.question = message.content
         
-        # Initialize empty dictionaries for steps and tracking
-        steps = {}
-        updated_steps = {"analyze": False, "retrieve": False, "generate": False, "reject": False}
-        
-        # Store the tracking dictionary in the session
-        session.model.updated_steps = updated_steps
-        
-        # Store the steps dictionary in the session for the nodes to access
-        session.model.steps = steps
-        
         # Create a message object for streaming that we'll use internally
-        temp_msg = cl.Message(content="", author="Sailors Parrot")
-        await temp_msg.send()  # Send the empty message so we can stream to it
-        session.model.current_message = temp_msg  # Store for streaming in the generate step
+        # temp_msg = cl.Message(content="", author="Sailors Parrot")
+        # await temp_msg.send()  # Send the empty message so we can stream to it
+        message = cl.Message(content="", author="Sailors Parrot")
+        session.model.current_message = message
         
         # Run the chain
         result = await chain.ainvoke(session.model.model_dump())
         
         # Batch updates
         with session.batch_update() as state:
+            # TODO need to totally redo chat history
             state.chat_history = result["chat_history"]
             state.chat_history.append({"role": "human", "content": message.content})
             state.chat_history.append({"role": "assistant", "content": result["answer"]})
             state.current_message = None
-            state.steps = {}
-            state.updated_steps = {}
         
         # Add sources if needed
         # settings = cl.user_session.get("settings", UserSettings())
@@ -232,7 +222,7 @@ async def main(message: cl.Message):
         #     temp_msg.elements = format_docs_as_sources(result["current_context"])
         #     await temp_msg.update()
             
-        return temp_msg
+        return message
         
     except Exception as e:
         logger.error("Error in message processing", exc_info=True)

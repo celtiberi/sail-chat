@@ -72,10 +72,7 @@ class State(BaseModel):
     visual_docs: List[Document] = Field(default_factory=list)  # Visual search results
     chat_history: List[Dict] | None = Field(default_factory=list)
     context: List[Document] | None = Field(default_factory=list)
-    current_step: Any = None  # Chainlit step for streaming responses
     current_message: Any = None  # Chainlit message for streaming responses
-    steps: Dict[str, Any] = Field(default_factory=dict)  # Dictionary of steps for each node
-    updated_steps: Dict[str, bool] = Field(default_factory=dict)  # Track which steps have been updated
 
 class SessionManager:
     """

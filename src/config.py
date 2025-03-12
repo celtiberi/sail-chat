@@ -99,6 +99,8 @@ class RetrieverConfig:
     visual_doc_search_k: int = 5   # Number of visual docs to retrieve
     doc_window_size: int = 30      # Maximum number of docs to keep in context window
     chat_window_size: int = 10     # Number of message pairs to keep in chat history
+    corpus_visual_search_k: int = 3  # Number of results to retrieve from visual search service
+    corpus_chroma_search_k: int = 5  # Number of results to retrieve from chroma search service
     query_template: str = ""
     system_template: str = ""
     chat: dict = field(default_factory=dict)
