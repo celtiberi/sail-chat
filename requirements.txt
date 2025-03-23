@@ -29,4 +29,9 @@ srsly>=2.4.6
 
 # Custom modules
 # Note: byaldi should be installed from the custom_modules directory
-# or specified as a git dependency if available publicly 
+# or specified as a git dependency if available publicly
+
+# Added from the code block
+openai>=1.0.0
+pytest>=7.0.0
+requests>=2.31.0 
