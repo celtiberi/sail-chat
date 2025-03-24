@@ -1,4 +1,5 @@
 import os
+import asyncio
 from pathlib import Path
 import chainlit as cl
 from langchain_google_genai import ChatGoogleGenerativeAI
@@ -18,6 +19,11 @@ import platform
 from utils.logger import ConversationLogger
 import uuid
 from langchain.schema import SystemMessage, HumanMessage
+from tools import wind_data_tool, documents_tool
+from langchain_core.tools import tool
+from langchain_core.prompts import ChatPromptTemplate
+from langchain.agents import create_tool_calling_agent, AgentExecutor
+from langchain_core.messages.tool import ToolMessage
 
 # Import centralized configuration
 from src.config import (
@@ -48,31 +54,124 @@ logger.info("INFO logging is enabled")
 # Initialize conversation logger
 conversation_logger = ConversationLogger()
 
-def create_chain(retriever: Retriever):
-    """Create a LangGraph chain with validation."""
-    # Create StateGraph with sequential execution
-    graph_builder = StateGraph(State)
+@tool
+async def process_wind_data(
+    min_lat: float = 37.5, 
+    max_lat: float = 42.5, 
+    min_lon: float = -72.5, 
+    max_lon: float = -67.5) -> None:
+    """Get current wind data and visualization for a specific geographical region.
+    Use this tool when the user is asking about current wind conditions, weather, or sailing conditions in a specific area."""
     
-    # Add nodes
-    graph_builder.add_node("analyze", retriever.analyze_query)
-    graph_builder.add_node("retrieve", retriever.retrieve)
-    graph_builder.add_node("generate", retriever.generate)
-    graph_builder.add_node("reject", retriever.reject_query)
+    # Call the wind_data_tool with the arguments as a dictionary
+    wind_data = await wind_data_tool({
+        "min_lat": min_lat,
+        "max_lat": max_lat,
+        "min_lon": min_lon,
+        "max_lon": max_lon
+    })
     
-    # Add edges with a clear sequential flow
-    graph_builder.add_edge(START, "analyze")
+    elements = []
+    output = ""
+    if "error" in wind_data:
+        output = wind_data['error']
+    else:
+       elements.append(
+            cl.Image(
+                name="wind_map",
+                display="inline",
+                size="large",
+                url=f"data:image/png;base64,{wind_data['image_base64']}"
+            )
+        )    
+    # await cl.Message(
+    #             content=output,
+    #             elements=elements,
+    #             author="Sailors Parrot"
+    #         ).send()
     
+    # what is return here goes to the model that used the tool
+    # response_for_llm = transform(response)
+    return {
+        "grib_file": wind_data['grib_file'],
+        "data_points": wind_data['data_points'],
+        "elements": elements,
+    }
+
+@tool
+async def process_documents() -> List[Document]:
+    """Retrieve relevant sailing and boating documents from the knowledge base.
+    Use this tool when the user is asking about sailing techniques, boat maintenance, or general sailing knowledge."""
+    session = cl.user_session.get("session")
+    result = await documents_tool(session.model)
+
+    return result
+
+def create_tool_calling_agent():
+    # Create prompt for the agent
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", """You are a helpful sailing and boating assistant. You can:
+1. Get current wind/weather data for specific locations
+2. Answer questions about sailing techniques, boat maintenance, and general sailing knowledge
+
+Choose the most appropriate tool based on the question's intent and content."""),
+        ("human", "{input}"),
+        ("placeholder", "{agent_scratchpad}")
+    ])
     
+    # Create LLM
+    # todo might not need to pass a temperature here
+    llm = ChatGoogleGenerativeAI(model="gemini-2.0-flash", temperature=0)
     
-    # Continue the sequential flow
-    graph_builder.add_edge("analyze", "retrieve")
-    graph_builder.add_edge("retrieve", "generate")
-    
-    # Set reject and generate as finish points
-    graph_builder.set_finish_point("reject")
-    graph_builder.set_finish_point("generate")
-    
-    return graph_builder.compile()
+    # Create the agent with tools
+    tools = [process_wind_data, process_documents]
+    llm_with_tools = llm.bind_tools(tools)
+    # agent = create_tool_calling_agent(llm, tools, prompt)
+    # agent_executor = AgentExecutor(agent=agent, tools=tools, verbose=True)
+    return llm_with_tools
+
+
+async def process_query(state):
+    """Process the query using the agent."""
+    try:
+        llm_with_tools = cl.user_session.get("llm_with_tools")
+
+        messages = [
+            HumanMessage(state.question),
+        ]
+
+        result = await llm_with_tools.ainvoke(messages)
+        
+        if 'content' in result:
+             await cl.Message(
+                content=result['content'],
+                author="Sailors Parrot"
+            ).send()
+        else:     
+            # Execute each tool call
+            # todo handle no tool_calls
+            for tool_call in result.tool_calls:
+                selected_tool = {
+                    "process_wind_data": process_wind_data, 
+                    "process_documents": process_documents}[tool_call["name"].lower()]
+                
+                tool_result = await selected_tool.ainvoke(tool_call["args"])
+
+            elements = tool_result.get('elements', [])
+            content = tool_result.get('content', '')
+
+            if elements or content:
+                await cl.Message(
+                    elements=elements,
+                    content=content,
+                    author="Sailors Parrot"
+                ).send()
+            
+    except Exception as e:
+        logger.error(f"Error in agent execution: {e}")
+        return {"next": "reject"}
+        
+
 
 @cl.on_chat_start
 async def on_chat_start():
@@ -84,14 +183,9 @@ async def on_chat_start():
         session = SessionManager(State)
         cl.user_session.set("session", session)
         
-        # Create retriever (LLM will be created internally)
-        retriever = Retriever()
-        
-        # Create chain with State class as schema
-        chain = create_chain(retriever)
-        
-        # Store chain and empty chat history
-        cl.user_session.set("chain", chain)
+        llm_with_tools = create_tool_calling_agent()
+
+        cl.user_session.set("llm_with_tools", llm_with_tools)
         cl.user_session.set("state", State(question=""))
         cl.user_session.set("settings", UserSettings())
         
@@ -129,33 +223,6 @@ def format_docs_as_sources(docs: List[Document]) -> List[cl.Text]:
         for idx, doc in enumerate(docs, 1)
     ]
 
-async def create_detailed_step(name: str, description: str = None, show_input: bool = True) -> cl.Step:
-    """Create a detailed step with proper configuration for visualization.
-    
-    Args:
-        name: Name of the step
-        description: Optional description of what the step does
-        show_input: Whether to show the input in the UI
-        
-    Returns:
-        A configured Chainlit Step
-    """
-    # Create step with proper type for visualization
-    step = cl.Step(
-        name=name,
-        type="tool" if show_input else "run",
-        show_input=show_input
-    )
-    
-    # Add description if provided
-    if description:
-        step.output = description
-    
-    # Send the step to display it in the UI
-    await step.send()
-    
-    return step
-
 @cl.on_message
 async def on_message(message: cl.Message):
     try:
@@ -192,11 +259,9 @@ async def main(message: cl.Message):
         if not session:
             raise ValueError("Session not initialized")
             
-        chain = cl.user_session.get("chain")
-        if not chain:
-            raise ValueError("Chain not initialized")
-        
         # Create state for this retrieval process
+        # TODO I think this should go into the state as the query
+        # and why 'model' and not 'state'? Oh.. it is the model.  We call it state everywhere else.
         session.model.question = message.content
         
         # Create a message object for streaming that we'll use internally
@@ -205,15 +270,14 @@ async def main(message: cl.Message):
         message = cl.Message(content="", author="Sailors Parrot")
         session.model.current_message = message
         
-        # Run the chain
-        result = await chain.ainvoke(session.model.model_dump())
+        result = await process_query(session.model)
         
         # Batch updates
         with session.batch_update() as state:
             # TODO need to totally redo chat history
-            state.chat_history = result["chat_history"]
-            state.chat_history.append({"role": "human", "content": message.content})
-            state.chat_history.append({"role": "assistant", "content": result["answer"]})
+            # state.chat_history = result["chat_history"]
+            # state.chat_history.append({"role": "human", "content": message.content})
+            # state.chat_history.append({"role": "assistant", "content": result["answer"]})
             state.current_message = None
         
         # Add sources if needed
@@ -221,7 +285,10 @@ async def main(message: cl.Message):
         # if settings.show_sources and result.get("current_context"):
         #     temp_msg.elements = format_docs_as_sources(result["current_context"])
         #     await temp_msg.update()
-            
+
+        # TODO: we are returning the message here but it was already sent
+        # in process_query.  Process query should be returning what is needed
+        # to build the message
         return message
         
     except Exception as e:
@@ -231,17 +298,6 @@ async def main(message: cl.Message):
 @cl.on_chat_end
 async def end():
     try:
-        # Get the retriever from the user session
-        chain = cl.user_session.get("chain")
-        if chain and hasattr(chain, "retriever"):
-            retriever = chain.retriever
-            
-            # Close the service client if it exists
-            if hasattr(retriever, "service_client"):
-                logger.info("Closing service client connection")
-                await retriever.service_client.close()
-                logger.info("Service client connection closed")
-        
         await cl.Message(
             content="Chat session ended. Thank you for using the assistant!",
             author="Sailors Parrot"

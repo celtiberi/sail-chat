@@ -73,6 +73,8 @@ class State(BaseModel):
     chat_history: List[Dict] | None = Field(default_factory=list)
     context: List[Document] | None = Field(default_factory=list)
     current_message: Any = None  # Chainlit message for streaming responses
+    wind_data: Dict[str, Any] | None = None  # Wind data from the API
+    wind_data_args: Dict[str, Any] | None = None  # Arguments for the wind data tool call
 
 class SessionManager:
     """

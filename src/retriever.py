@@ -140,6 +140,7 @@ class Retriever:
             return {
                 "query": query
                 }
+        
         except Exception as e:
             logger.error(f"Error analyzing query: {str(e)}", exc_info=True)
             return {
@@ -442,8 +443,6 @@ class Retriever:
         
         return messages
 
-    
-        
     async def generate(self, state: State) -> Dict[str, str]:
         """Generate response using both current and running context."""
         try:
