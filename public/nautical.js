@@ -117,10 +117,12 @@ document.addEventListener('DOMContentLoaded', function() {
             <span>Example: "What safety equipment should I have for coastal sailing in the Pacific Northwest?"</span>
             <span>Example: "What is the best route from Isla Mujeres to Key West?"</span>
             <span>Example: "Water is not flowing through my engine very well.  What are the possible causes?"</span>
+            <span>Example: "What are the current wind conditions in the Caribbean Sea?"</span>
             
             <div style="margin-top: 10px; padding-top: 10px; border-top: 1px solid #4a90e2;">
                 <h4 style="margin-top: 0; color: #4a90e2; font-size: 16px;">🆕 Recent Updates:</h4>
                 <ul style="padding-left: 20px; margin-bottom: 10px;">
+                    <li><strong>Wind Data by Location:</strong> You can now get wind information by specifying a location name (e.g. "Caribbean Sea") or by coordinates.</li>
                     <li><strong>DeepSeek Integration:</strong> We've integrated with DeepSeek for enhanced reasoning responses, providing more detailed and accurate nautical information.</li>
                     <li>Version ${window.NAUTICAL_CONFIG.version}</li>
                 </ul>

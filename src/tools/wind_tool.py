@@ -1,4 +1,4 @@
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Union
 from langchain.tools import tool
 from pydantic import BaseModel, Field
 import httpx
@@ -34,21 +34,35 @@ class BoundingBox(BaseModel):
     )
 
 async def wind_data_tool(
-    bounding_box: BoundingBox,
+    input_data: Union[BoundingBox, str],
     endpoint: str = "http://localhost:8000"
 ) -> Dict[str, Any]:
+    """
+    Get wind data for either a bounding box or location name.
     
+    Args:
+        input_data: Either a BoundingBox object or a location name string
+        endpoint: The API endpoint URL
+    """
     try:
         async with httpx.AsyncClient() as client:
-            response = await client.post(
-                f"{endpoint}/wind-data",
-                json={
-                    "min_lat": bounding_box["min_lat"],
-                    "max_lat": bounding_box["max_lat"],
-                    "min_lon": bounding_box["min_lon"],
-                    "max_lon": bounding_box["max_lon"]
-                }
-            )
+            if isinstance(input_data, str):
+                # If input is a string, treat it as a location name
+                response = await client.post(
+                    f"{endpoint}/wind-data",
+                    json={"name": input_data}
+                )
+            else:
+                # If input is a BoundingBox, use its coordinates
+                response = await client.post(
+                    f"{endpoint}/wind-data",
+                    json={
+                        "min_lat": input_data.min_lat,
+                        "max_lat": input_data.max_lat,
+                        "min_lon": input_data.min_lon,
+                        "max_lon": input_data.max_lon
+                    }
+                )
             response.raise_for_status()
             return response.json()
                 

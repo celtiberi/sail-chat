@@ -4,7 +4,7 @@ from pathlib import Path
 import chainlit as cl
 from langchain_google_genai import ChatGoogleGenerativeAI
 import sys
-from typing import Optional, Tuple, List, Dict, Any, Set, Callable, Literal
+from typing import Optional, Tuple, List, Dict, Any, Set, Callable, Literal, Union
 import logging
 from time import perf_counter
 from langchain_core.documents import Document
@@ -24,6 +24,8 @@ from langchain_core.tools import tool
 from langchain_core.prompts import ChatPromptTemplate
 from langchain.agents import create_tool_calling_agent, AgentExecutor
 from langchain_core.messages.tool import ToolMessage
+import aiohttp
+import ssl
 
 # Import centralized configuration
 from src.config import (
@@ -56,20 +58,19 @@ conversation_logger = ConversationLogger()
 
 @tool
 async def process_wind_data(
-    min_lat: float = 37.5, 
-    max_lat: float = 42.5, 
-    min_lon: float = -72.5, 
-    max_lon: float = -67.5) -> None:
+    input_data: Union[Dict[str, float], str],
+) -> None:
     """Get current wind data and visualization for a specific geographical region.
-    Use this tool when the user is asking about current wind conditions, weather, or sailing conditions in a specific area."""
+    Use this tool when the user is asking about current wind conditions, weather, or sailing conditions.
     
-    # Call the wind_data_tool with the arguments as a dictionary
-    wind_data = await wind_data_tool({
-        "min_lat": min_lat,
-        "max_lat": max_lat,
-        "min_lon": min_lon,
-        "max_lon": max_lon
-    })
+    Args:
+        input_data: Either:
+            - A dictionary with keys 'min_lat', 'max_lat', 'min_lon', 'max_lon' (all float values)
+            - A string representing a location name (e.g. "Caribbean Sea")
+    """
+    
+    # Call the wind_data_tool with the input data
+    wind_data = await wind_data_tool(input_data)
     
     elements = []
     output = ""
@@ -84,14 +85,7 @@ async def process_wind_data(
                 url=f"data:image/png;base64,{wind_data['image_base64']}"
             )
         )    
-    # await cl.Message(
-    #             content=output,
-    #             elements=elements,
-    #             author="Sailors Parrot"
-    #         ).send()
     
-    # what is return here goes to the model that used the tool
-    # response_for_llm = transform(response)
     return {
         "grib_file": wind_data['grib_file'],
         "data_points": wind_data['data_points'],
@@ -108,17 +102,6 @@ async def process_documents() -> List[Document]:
     return result
 
 def create_tool_calling_agent():
-    # Create prompt for the agent
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", """You are a helpful sailing and boating assistant. You can:
-1. Get current wind/weather data for specific locations
-2. Answer questions about sailing techniques, boat maintenance, and general sailing knowledge
-
-Choose the most appropriate tool based on the question's intent and content."""),
-        ("human", "{input}"),
-        ("placeholder", "{agent_scratchpad}")
-    ])
-    
     # Create LLM
     # todo might not need to pass a temperature here
     llm = ChatGoogleGenerativeAI(model="gemini-2.0-flash", temperature=0)
