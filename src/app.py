@@ -69,23 +69,31 @@ async def process_wind_data(
             - A string representing a location name (e.g. "Caribbean Sea")
     """
     
-    # Call the wind_data_tool with the input data
-    wind_data = await wind_data_tool(input_data)
-    
-    elements = []
-    output = ""
-    if "error" in wind_data:
-        output = wind_data['error']
-    else:
-       elements.append(
-            cl.Image(
-                name="wind_map",
-                display="inline",
-                size="large",
-                url=f"data:image/png;base64,{wind_data['image_base64']}"
-            )
-        )    
-    
+    # TODO: need to use the AI to get a good name.  They might ask something
+    # like "what is the weather on the west coast of florida"
+
+    #TODO: need to add a step so that they can see somethign is happening
+
+    with cl.Step(name="Getting Weather Data", type="tool") as weather_step:
+        # Call the wind_data_tool with the input data
+        wind_data = await wind_data_tool(input_data)
+        
+        elements = []
+        output = ""
+        if "error" in wind_data:
+            output = wind_data['error']
+        else:
+            elements.append(
+                    cl.Image(
+                        name="wind_map",
+                        display="inline",
+                        size="large",
+                        url=f"data:image/png;base64,{wind_data['image_base64']}"
+                    )
+                )    
+        weather_step.output = wind_data['grib_file']
+        await weather_step.update()
+        
     return {
         "grib_file": wind_data['grib_file'],
         "data_points": wind_data['data_points'],
