@@ -19,7 +19,7 @@ import platform
 from utils.logger import ConversationLogger
 import uuid
 from langchain.schema import SystemMessage, HumanMessage
-from tools import wind_data_tool, documents_tool
+from tools import wind_data_tool, documents_tool, wave_data_tool
 from langchain_core.tools import tool
 from langchain_core.prompts import ChatPromptTemplate
 from langchain.agents import create_tool_calling_agent, AgentExecutor
@@ -74,7 +74,7 @@ async def process_wind_data(
 
     #TODO: need to add a step so that they can see somethign is happening
 
-    with cl.Step(name="Getting Weather Data", type="tool") as weather_step:
+    with cl.Step(name="Getting Wind Data", type="tool") as weather_step:
         # Call the wind_data_tool with the input data
         wind_data = await wind_data_tool(input_data)
         
@@ -97,6 +97,47 @@ async def process_wind_data(
     return {
         "grib_file": wind_data['grib_file'],
         "data_points": wind_data['data_points'],
+        "description": wind_data['description'],
+        "elements": elements,
+    }
+
+@tool
+async def process_wave_data(
+    input_data: Union[Dict[str, float], str],
+) -> None:
+    """Get current wave data and visualization for a specific geographical region.
+    Use this tool when the user is asking about current wave conditions, swell, weather, or sea state.
+    
+    Args:
+        input_data: Either:
+            - A dictionary with keys 'min_lat', 'max_lat', 'min_lon', 'max_lon' (all float values)
+            - A string representing a location name (e.g. "Caribbean Sea")
+    """
+    
+    with cl.Step(name="Getting Wave Data", type="tool") as wave_step:
+        # Call the wave_data_tool with the input data
+        wave_data = await wave_data_tool(input_data)
+        
+        elements = []
+        output = ""
+        if "error" in wave_data:
+            output = wave_data['error']
+        else:
+            elements.append(
+                    cl.Image(
+                        name="wave_map",
+                        display="inline",
+                        size="large",
+                        url=f"data:image/png;base64,{wave_data['image_base64']}"
+                    )
+                )    
+        wave_step.output = wave_data['grib_file']
+        await wave_step.update()
+        
+    return {
+        "grib_file": wave_data['grib_file'],
+        "data_points": wave_data['data_points'],
+        "description": wave_data['description'],
         "elements": elements,
     }
 
@@ -115,7 +156,7 @@ def create_tool_calling_agent():
     llm = ChatGoogleGenerativeAI(model="gemini-2.0-flash", temperature=0)
     
     # Create the agent with tools
-    tools = [process_wind_data, process_documents]
+    tools = [process_wind_data, process_wave_data, process_documents]
     llm_with_tools = llm.bind_tools(tools)
     # agent = create_tool_calling_agent(llm, tools, prompt)
     # agent_executor = AgentExecutor(agent=agent, tools=tools, verbose=True)
@@ -133,6 +174,8 @@ async def process_query(state):
 
         result = await llm_with_tools.ainvoke(messages)
         
+        elements = []
+        content = ""
         if 'content' in result:
              await cl.Message(
                 content=result['content'],
@@ -143,13 +186,16 @@ async def process_query(state):
             # todo handle no tool_calls
             for tool_call in result.tool_calls:
                 selected_tool = {
-                    "process_wind_data": process_wind_data, 
+                    "process_wind_data": process_wind_data,
+                    "process_wave_data": process_wave_data,
                     "process_documents": process_documents}[tool_call["name"].lower()]
                 
                 tool_result = await selected_tool.ainvoke(tool_call["args"])
 
-            elements = tool_result.get('elements', [])
-            content = tool_result.get('content', '')
+                elements.extend(tool_result.get('elements', []))
+                # TODO the descriptions froms the wind and wave api calls are not worth displaying yet
+                # if tool_result.get('description'):
+                #     content += '\n' + tool_result['description']
 
             if elements or content:
                 await cl.Message(

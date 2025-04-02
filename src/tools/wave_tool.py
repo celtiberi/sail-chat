@@ -6,12 +6,12 @@ from PIL import Image
 import io
 from src.schemas import BoundingBox
 
-async def wind_data_tool(
+async def wave_data_tool(
     input_data: Union[BoundingBox, str],
     endpoint: str = "http://localhost:8000"
 ) -> Dict[str, Any]:
     """
-    Get wind data for either a bounding box or location name.
+    Get wave data for either a bounding box or location name.
     
     Args:
         input_data: Either a BoundingBox object or a location name string
@@ -22,13 +22,13 @@ async def wind_data_tool(
             if isinstance(input_data, str):
                 # If input is a string, treat it as a location name
                 response = await client.post(
-                    f"{endpoint}/wind-data",
+                    f"{endpoint}/wave-data",
                     json={"name": input_data}
                 )
             else:
                 # If input is a BoundingBox, use its coordinates
                 response = await client.post(
-                    f"{endpoint}/wind-data",
+                    f"{endpoint}/wave-data",
                     json={
                         "min_lat": input_data.min_lat,
                         "max_lat": input_data.max_lat,
@@ -40,6 +40,4 @@ async def wind_data_tool(
             return response.json()
                 
     except Exception as e:
-        return {"error": f"Failed to fetch wind data: {str(e)}"} 
-    
-    
+        return {"error": f"Failed to fetch wave data: {str(e)}"} 
