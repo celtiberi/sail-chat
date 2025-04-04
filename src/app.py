@@ -19,7 +19,7 @@ import platform
 from utils.logger import ConversationLogger
 import uuid
 from langchain.schema import SystemMessage, HumanMessage
-from tools import wind_data_tool, documents_tool, wave_data_tool
+from tools import wind_data_tool, documents_tool, wave_data_tool, forecast_tool
 from langchain_core.tools import tool
 from langchain_core.prompts import ChatPromptTemplate
 from langchain.agents import create_tool_calling_agent, AgentExecutor
@@ -142,6 +142,38 @@ async def process_wave_data(
     }
 
 @tool
+async def process_forecast(
+    input_data: Union[Dict[str, float], str],
+) -> None:
+    """Get NOAA marine text  forecast for a specific geographical region.
+    Use this tool when the user is asking about marine weather forecasts, conditions, or predictions.
+    
+    Args:
+        input_data: Either:
+            - A dictionary with keys 'min_lat', 'max_lat', 'min_lon', 'max_lon' (all float values)
+            - A string representing a location name (e.g. "Caribbean Sea")
+    """
+    
+    with cl.Step(name="Getting Marine Forecast", type="tool") as forecast_step:
+        # Call the forecast_tool with the input data
+        forecast_data = await forecast_tool(input_data)
+        
+        elements = []
+        content = ""
+        if forecast_data.get("error") is not None:
+            content = forecast_data['error']
+        else:
+            content = forecast_data.get('forecast', '')
+        
+        forecast_step.output = content
+        await forecast_step.update()
+        
+    return {
+        "content": content,
+        "elements": elements,
+    }
+
+@tool
 async def process_documents() -> List[Document]:
     """Retrieve relevant sailing and boating documents from the knowledge base.
     Use this tool when the user is asking about sailing techniques, boat maintenance, or general sailing knowledge."""
@@ -156,7 +188,7 @@ def create_tool_calling_agent():
     llm = ChatGoogleGenerativeAI(model="gemini-2.0-flash", temperature=0)
     
     # Create the agent with tools
-    tools = [process_wind_data, process_wave_data, process_documents]
+    tools = [process_wind_data, process_wave_data, process_forecast, process_documents]
     llm_with_tools = llm.bind_tools(tools)
     # agent = create_tool_calling_agent(llm, tools, prompt)
     # agent_executor = AgentExecutor(agent=agent, tools=tools, verbose=True)
@@ -188,14 +220,14 @@ async def process_query(state):
                 selected_tool = {
                     "process_wind_data": process_wind_data,
                     "process_wave_data": process_wave_data,
+                    "process_forecast": process_forecast,
                     "process_documents": process_documents}[tool_call["name"].lower()]
                 
                 tool_result = await selected_tool.ainvoke(tool_call["args"])
 
                 elements.extend(tool_result.get('elements', []))
-                # TODO the descriptions froms the wind and wave api calls are not worth displaying yet
-                # if tool_result.get('description'):
-                #     content += '\n' + tool_result['description']
+                if tool_result.get('content'):
+                    content += '\n' + tool_result['content']
 
             if elements or content:
                 await cl.Message(
