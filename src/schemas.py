@@ -25,4 +25,17 @@ class BoundingBox(BaseModel):
         description="Maximum longitude (-180 to 180)",
         ge=-180.0,
         le=180.0
+    )
+
+class Coordinates(BaseModel):
+    """Input for single point location queries."""
+    lat: float = Field(
+        description="Latitude (-90 to 90)",
+        ge=-90.0,
+        le=90.0
+    )
+    lon: float = Field(
+        description="Longitude (-180 to 180)",
+        ge=-180.0,
+        le=180.0
     ) 

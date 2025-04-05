@@ -26,6 +26,7 @@ from langchain.agents import create_tool_calling_agent, AgentExecutor
 from langchain_core.messages.tool import ToolMessage
 import aiohttp
 import ssl
+from src.schemas import BoundingBox, Coordinates
 
 # Import centralized configuration
 from src.config import (
@@ -65,17 +66,24 @@ async def process_wind_data(
     
     Args:
         input_data: Either:
-            - A dictionary with keys 'min_lat', 'max_lat', 'min_lon', 'max_lon' (all float values)
+            - A dictionary with keys 'min_lat', 'max_lat', 'min_lon', 'max_lon' (all float values) for a region
+            - A dictionary with keys 'lat', 'lon' (both float values) for a specific point
             - A string representing a location name (e.g. "Caribbean Sea")
     """
     
-    # TODO: need to use the AI to get a good name.  They might ask something
-    # like "what is the weather on the west coast of florida"
-
-    #TODO: need to add a step so that they can see somethign is happening
+    # Convert dictionary to appropriate object if needed
+    if isinstance(input_data, dict):
+        if 'lat' in input_data and 'lon' in input_data:
+            input_data = Coordinates(lat=input_data['lat'], lon=input_data['lon'])
+        elif all(k in input_data for k in ['min_lat', 'max_lat', 'min_lon', 'max_lon']):
+            input_data = BoundingBox(
+                min_lat=input_data['min_lat'],
+                max_lat=input_data['max_lat'],
+                min_lon=input_data['min_lon'],
+                max_lon=input_data['max_lon']
+            )
 
     with cl.Step(name="Getting Wind Data", type="tool") as weather_step:
-        # Call the wind_data_tool with the input data
         wind_data = await wind_data_tool(input_data)
         
         elements = []
@@ -110,12 +118,24 @@ async def process_wave_data(
     
     Args:
         input_data: Either:
-            - A dictionary with keys 'min_lat', 'max_lat', 'min_lon', 'max_lon' (all float values)
+            - A dictionary with keys 'min_lat', 'max_lat', 'min_lon', 'max_lon' (all float values) for a region
+            - A dictionary with keys 'lat', 'lon' (both float values) for a specific point
             - A string representing a location name (e.g. "Caribbean Sea")
     """
     
+    # Convert dictionary to appropriate object if needed
+    if isinstance(input_data, dict):
+        if 'lat' in input_data and 'lon' in input_data:
+            input_data = Coordinates(lat=input_data['lat'], lon=input_data['lon'])
+        elif all(k in input_data for k in ['min_lat', 'max_lat', 'min_lon', 'max_lon']):
+            input_data = BoundingBox(
+                min_lat=input_data['min_lat'],
+                max_lat=input_data['max_lat'],
+                min_lon=input_data['min_lon'],
+                max_lon=input_data['max_lon']
+            )
+
     with cl.Step(name="Getting Wave Data", type="tool") as wave_step:
-        # Call the wave_data_tool with the input data
         wave_data = await wave_data_tool(input_data)
         
         elements = []
@@ -145,17 +165,29 @@ async def process_wave_data(
 async def process_forecast(
     input_data: Union[Dict[str, float], str],
 ) -> None:
-    """Get NOAA marine text  forecast for a specific geographical region.
+    """Get NOAA marine text forecast for a specific geographical region.
     Use this tool when the user is asking about marine weather forecasts, conditions, or predictions.
     
     Args:
         input_data: Either:
-            - A dictionary with keys 'min_lat', 'max_lat', 'min_lon', 'max_lon' (all float values)
+            - A dictionary with keys 'min_lat', 'max_lat', 'min_lon', 'max_lon' (all float values) for a region
+            - A dictionary with keys 'lat', 'lon' (both float values) for a specific point
             - A string representing a location name (e.g. "Caribbean Sea")
     """
     
+    # Convert dictionary to appropriate object if needed
+    if isinstance(input_data, dict):
+        if 'lat' in input_data and 'lon' in input_data:
+            input_data = Coordinates(lat=input_data['lat'], lon=input_data['lon'])
+        elif all(k in input_data for k in ['min_lat', 'max_lat', 'min_lon', 'max_lon']):
+            input_data = BoundingBox(
+                min_lat=input_data['min_lat'],
+                max_lat=input_data['max_lat'],
+                min_lon=input_data['min_lon'],
+                max_lon=input_data['max_lon']
+            )
+
     with cl.Step(name="Getting Marine Forecast", type="tool") as forecast_step:
-        # Call the forecast_tool with the input data
         forecast_data = await forecast_tool(input_data)
         
         elements = []
